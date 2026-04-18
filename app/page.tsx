@@ -28,6 +28,9 @@ type DebugInfo = {
   cached?: boolean
   cacheAgeSec?: number
   generatedAt?: string
+  totalCandidates?: number
+  batchStart?: number
+  batchEnd?: number
 }
 
 const AUTO_REFRESH_OPTIONS = [30, 60, 120, 300]
@@ -66,10 +69,6 @@ export default function Home() {
   const favNotWinning22Red = filteredMatches.filter(
     (m) => m.type === 'fav_not_winning_22_red'
   )
-
-  const debugLive = debug?.live ?? 0
-  const debugChecked = debug?.checked ?? 0
-  const debugResults = debug?.results ?? 0
 
   const playBeep = () => {
     try {
@@ -412,32 +411,52 @@ export default function Home() {
         {debug && (
           <div className="bg-white border rounded-2xl p-4 shadow-sm mb-6">
             <div className="font-semibold mb-3">Debug importu</div>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
               <div className="bg-gray-50 rounded-xl p-3">
                 <div className="text-gray-500">Live</div>
-                <div className="font-bold text-lg">{debugLive}</div>
+                <div className="font-bold text-lg">{debug.live ?? 0}</div>
               </div>
+
               <div className="bg-gray-50 rounded-xl p-3">
                 <div className="text-gray-500">Odds checked</div>
-                <div className="font-bold text-lg">{debugChecked}</div>
+                <div className="font-bold text-lg">{debug.checked ?? 0}</div>
               </div>
+
               <div className="bg-gray-50 rounded-xl p-3">
                 <div className="text-gray-500">Results</div>
-                <div className="font-bold text-lg">{debugResults}</div>
+                <div className="font-bold text-lg">{debug.results ?? 0}</div>
               </div>
+
               <div className="bg-gray-50 rounded-xl p-3">
                 <div className="text-gray-500">Cache</div>
-                <div className="font-bold text-lg">
-                  {debug.cached ? 'Tak' : 'Nie'}
-                </div>
+                <div className="font-bold text-lg">{debug.cached ? 'Tak' : 'Nie'}</div>
               </div>
+
               <div className="bg-gray-50 rounded-xl p-3">
                 <div className="text-gray-500">Wiek cache</div>
-                <div className="font-bold text-lg">
-                  {debug.cacheAgeSec ?? 0}s
-                </div>
+                <div className="font-bold text-lg">{debug.cacheAgeSec ?? 0}s</div>
+              </div>
+
+              <div className="bg-gray-50 rounded-xl p-3">
+                <div className="text-gray-500">Kandydaci</div>
+                <div className="font-bold text-lg">{debug.totalCandidates ?? 0}</div>
+              </div>
+
+              <div className="bg-gray-50 rounded-xl p-3">
+                <div className="text-gray-500">Batch start</div>
+                <div className="font-bold text-lg">{debug.batchStart ?? 0}</div>
+              </div>
+
+              <div className="bg-gray-50 rounded-xl p-3">
+                <div className="text-gray-500">Batch end</div>
+                <div className="font-bold text-lg">{debug.batchEnd ?? 0}</div>
               </div>
             </div>
+
+            <pre className="mt-4 text-xs bg-black text-white p-3 rounded-xl overflow-auto">
+              {JSON.stringify(debug, null, 2)}
+            </pre>
           </div>
         )}
 

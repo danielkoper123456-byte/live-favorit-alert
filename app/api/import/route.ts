@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 
 const API_BASE = 'https://v3.football.api-sports.io'
 const MAX_ODDS_REQUESTS = 14
-const CACHE_TTL_MS = 60 * 1000
+const CACHE_TTL_MS = 20 * 1000
 
 const WAIT = (ms: number) => new Promise((res) => setTimeout(res, ms))
 
@@ -24,17 +24,22 @@ type AppMatch = {
   type: MatchType
 }
 
+type DebugInfo = {
+  live: number
+  checked: number
+  results: number
+  rawFixtures: number
+  cached: boolean
+  cacheAgeSec: number
+  generatedAt: string
+  totalCandidates: number
+  batchStart: number
+  batchEnd: number
+}
+
 type CachePayload = {
   matches: AppMatch[]
-  debug: {
-    live: number
-    checked: number
-    results: number
-    rawFixtures: number
-    cached: boolean
-    cacheAgeSec: number
-    generatedAt: string
-  }
+  debug: DebugInfo
 }
 
 declare global {
@@ -43,6 +48,13 @@ declare global {
     | {
         timestamp: number
         payload: CachePayload
+      }
+    | undefined
+
+  // eslint-disable-next-line no-var
+  var oddsScanState:
+    | {
+        cursor: number
       }
     | undefined
 }
@@ -160,7 +172,12 @@ function get1X2Odds(odds: any) {
   return { homeOdd, awayOdd }
 }
 
-function extractFavoriteWithMax(odds: any, home: string, away: string, maxOdd: number) {
+function extractFavoriteWithMax(
+  odds: any,
+  home: string,
+  away: string,
+  maxOdd: number
+) {
   const parsed = get1X2Odds(odds)
   if (!parsed) return null
 
@@ -187,7 +204,7 @@ function dedupeMatches(matches: AppMatch[]) {
     }
   }
 
-  return Array.from(map.values())
+  return Array.from(map.values()).sort((a, b) => b.minute - a.minute)
 }
 
 function buildCachedResponse(
@@ -196,7 +213,10 @@ function buildCachedResponse(
   checked: number,
   rawFixtures: number,
   cached: boolean,
-  cacheAgeSec: number
+  cacheAgeSec: number,
+  totalCandidates: number,
+  batchStart: number,
+  batchEnd: number
 ): CachePayload {
   return {
     matches,
@@ -208,8 +228,30 @@ function buildCachedResponse(
       cached,
       cacheAgeSec,
       generatedAt: new Date().toISOString(),
+      totalCandidates,
+      batchStart,
+      batchEnd,
     },
   }
+}
+
+function rotateBatch<T>(items: T[], start: number, size: number) {
+  if (items.length === 0) {
+    return { batch: [] as T[], nextCursor: 0, batchStart: 0, batchEnd: 0 }
+  }
+
+  const normalizedStart = start % items.length
+  const batch: T[] = []
+
+  for (let i = 0; i < Math.min(size, items.length); i++) {
+    batch.push(items[(normalizedStart + i) % items.length])
+  }
+
+  const nextCursor = (normalizedStart + batch.length) % items.length
+  const batchStart = normalizedStart + 1
+  const batchEnd = normalizedStart + batch.length
+
+  return { batch, nextCursor, batchStart, batchEnd }
 }
 
 export async function GET() {
@@ -238,28 +280,44 @@ export async function GET() {
       .map((f: any) => {
         const { homeGoals, awayGoals, score } = parseScore(f)
 
+        const minute = getMinute(f)
+        const home = f?.teams?.home?.name || 'Home'
+        const away = f?.teams?.away?.name || 'Away'
+        const redCard = extractRedCard(f, home, away)
+
+        let priority = 0
+
+        if (homeGoals !== awayGoals) priority += 3
+        if (minute >= 60) priority += 3
+        if (redCard) priority += 4
+        if (minute >= 75) priority += 2
+        if (minute >= 15 && homeGoals !== awayGoals) priority += 1
+
         return {
           id: f?.fixture?.id,
           league: f?.league?.name || 'Nieznana liga',
-          home: f?.teams?.home?.name || 'Home',
-          away: f?.teams?.away?.name || 'Away',
-          minute: getMinute(f),
+          home,
+          away,
+          minute,
           score,
           homeGoals,
           awayGoals,
-          redCard: extractRedCard(
-            f,
-            f?.teams?.home?.name || 'Home',
-            f?.teams?.away?.name || 'Away'
-          ),
+          redCard,
+          priority,
         }
       })
       .filter((c: any) => !!c.id)
-      .sort((a: any, b: any) => b.minute - a.minute)
+      .sort((a: any, b: any) => {
+        if (b.priority !== a.priority) return b.priority - a.priority
+        return b.minute - a.minute
+      })
 
-    const oddsCandidates = candidates
-      .filter((c: any) => c.homeGoals !== c.awayGoals || c.minute >= 60 || !!c.redCard)
-      .slice(0, MAX_ODDS_REQUESTS)
+    const currentCursor = globalThis.oddsScanState?.cursor || 0
+
+    const { batch: oddsCandidates, nextCursor, batchStart, batchEnd } =
+      rotateBatch(candidates, currentCursor, MAX_ODDS_REQUESTS)
+
+    globalThis.oddsScanState = { cursor: nextCursor }
 
     const matches: AppMatch[] = []
 
@@ -284,7 +342,8 @@ export async function GET() {
         const opponentGoals = favoriteIsHome ? c.awayGoals : c.homeGoals
 
         const losing = favoriteGoals < opponentGoals
-        const drawingOrLosingAfter60 = c.minute >= 60 && favoriteGoals <= opponentGoals
+        const drawingOrLosingAfter60 =
+          c.minute >= 60 && favoriteGoals <= opponentGoals
 
         if (losing) {
           matches.push({
@@ -352,7 +411,10 @@ export async function GET() {
       oddsCandidates.length,
       rawFixtures.length,
       false,
-      0
+      0,
+      candidates.length,
+      batchStart,
+      batchEnd
     )
 
     globalThis.importCache = {
