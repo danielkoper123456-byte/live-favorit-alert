@@ -18,6 +18,7 @@ type Match = {
   odds: number
   redCard: string | null
   type: MatchType
+  isNew?: boolean
 }
 
 type DebugInfo = {
@@ -31,6 +32,7 @@ type DebugInfo = {
   totalCandidates?: number
   batchStart?: number
   batchEnd?: number
+  version?: string
 }
 
 const AUTO_REFRESH_OPTIONS = [30, 60, 120, 300]
@@ -53,6 +55,7 @@ export default function Home() {
   const seenIdsRef = useRef<Set<string>>(new Set())
   const intervalRef = useRef<NodeJS.Timeout | null>(null)
   const dismissTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const newBadgeTimerRef = useRef<NodeJS.Timeout | null>(null)
 
   const numericMinMinute = Number(minMinute) || 0
 
@@ -156,19 +159,40 @@ export default function Home() {
         throw new Error(data.error || 'Błąd importu')
       }
 
-      const importedMatches: Match[] = data.matches || []
-      setMatches(importedMatches)
+      const rawImportedMatches: Match[] = data.matches || []
       setDebug(data.debug || null)
       setLastImport(new Date().toLocaleTimeString())
 
-      const currentIds = new Set(
-        importedMatches.map((m) => `${m.fixtureId}-${m.type}`)
-      )
-
       const previousIds = seenIdsRef.current
-      const newlyAdded = importedMatches.filter(
+      const newlyAdded = rawImportedMatches.filter(
         (m) => !previousIds.has(`${m.fixtureId}-${m.type}`)
       )
+
+      const currentIds = new Set<string>([
+        ...Array.from(previousIds),
+        ...rawImportedMatches.map((m) => `${m.fixtureId}-${m.type}`),
+      ])
+
+      const importedMatchesWithFlags: Match[] = rawImportedMatches.map((m) => ({
+        ...m,
+        isNew: newlyAdded.some(
+          (n) => `${n.fixtureId}-${n.type}` === `${m.fixtureId}-${m.type}`
+        ),
+      }))
+
+      setMatches((prev) => {
+        const map = new Map<string, Match>()
+
+        for (const m of prev) {
+          map.set(`${m.fixtureId}-${m.type}`, m)
+        }
+
+        for (const m of importedMatchesWithFlags) {
+          map.set(`${m.fixtureId}-${m.type}`, m)
+        }
+
+        return Array.from(map.values())
+      })
 
       if (previousIds.size > 0 && newlyAdded.length > 0) {
         const first = newlyAdded[0]
@@ -180,11 +204,18 @@ export default function Home() {
       }
 
       seenIdsRef.current = currentIds
+
+      if (newBadgeTimerRef.current) {
+        clearTimeout(newBadgeTimerRef.current)
+      }
+
+      newBadgeTimerRef.current = setTimeout(() => {
+        setMatches((prev) => prev.map((m) => ({ ...m, isNew: false })))
+      }, 10000)
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Błąd fetch')
       if (!silent) {
-        setMatches([])
         setDebug(null)
       }
     } finally {
@@ -204,6 +235,14 @@ export default function Home() {
     setAlertText('')
     setNewMatchesCount(0)
     seenIdsRef.current = new Set()
+
+    if (dismissTimerRef.current) {
+      clearTimeout(dismissTimerRef.current)
+    }
+
+    if (newBadgeTimerRef.current) {
+      clearTimeout(newBadgeTimerRef.current)
+    }
   }
 
   useEffect(() => {
@@ -236,6 +275,9 @@ export default function Home() {
       if (dismissTimerRef.current) {
         clearTimeout(dismissTimerRef.current)
       }
+      if (newBadgeTimerRef.current) {
+        clearTimeout(newBadgeTimerRef.current)
+      }
     }
   }, [])
 
@@ -249,9 +291,18 @@ export default function Home() {
     <div className="bg-white border rounded-2xl p-4 shadow-sm">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="font-semibold text-lg">
-            {match.home} vs {match.away}
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="font-semibold text-lg">
+              {match.home} vs {match.away}
+            </div>
+
+            {match.isNew && (
+              <span className="text-xs font-bold text-green-700 bg-green-100 px-2 py-1 rounded-full">
+                NOWY
+              </span>
+            )}
           </div>
+
           <div className="text-sm text-gray-500">{match.league}</div>
         </div>
 
@@ -412,7 +463,7 @@ export default function Home() {
           <div className="bg-white border rounded-2xl p-4 shadow-sm mb-6">
             <div className="font-semibold mb-3">Debug importu</div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-3 text-sm">
               <div className="bg-gray-50 rounded-xl p-3">
                 <div className="text-gray-500">Live</div>
                 <div className="font-bold text-lg">{debug.live ?? 0}</div>
@@ -430,7 +481,9 @@ export default function Home() {
 
               <div className="bg-gray-50 rounded-xl p-3">
                 <div className="text-gray-500">Cache</div>
-                <div className="font-bold text-lg">{debug.cached ? 'Tak' : 'Nie'}</div>
+                <div className="font-bold text-lg">
+                  {debug.cached ? 'Tak' : 'Nie'}
+                </div>
               </div>
 
               <div className="bg-gray-50 rounded-xl p-3">
@@ -439,24 +492,26 @@ export default function Home() {
               </div>
 
               <div className="bg-gray-50 rounded-xl p-3">
-                <div className="text-gray-500">Kandydaci</div>
-                <div className="font-bold text-lg">{debug.totalCandidates ?? 0}</div>
+                <div className="text-gray-500">Wszystkie mecze</div>
+                <div className="font-bold text-lg">
+                  {debug.totalCandidates ?? 0}
+                </div>
               </div>
 
-              <div className="bg-gray-50 rounded-xl p-3">
-                <div className="text-gray-500">Batch start</div>
-                <div className="font-bold text-lg">{debug.batchStart ?? 0}</div>
+              <div className="bg-gray-50 rounded-xl p-3 md:col-span-2">
+                <div className="text-gray-500">Batch</div>
+                <div className="font-bold text-lg">
+                  {debug.batchStart ?? 0}-{debug.batchEnd ?? 0}
+                </div>
               </div>
 
-              <div className="bg-gray-50 rounded-xl p-3">
-                <div className="text-gray-500">Batch end</div>
-                <div className="font-bold text-lg">{debug.batchEnd ?? 0}</div>
+              <div className="bg-gray-50 rounded-xl p-3 md:col-span-2">
+                <div className="text-gray-500">Wersja</div>
+                <div className="font-bold text-lg">
+                  {debug.version ?? 'brak'}
+                </div>
               </div>
             </div>
-
-            <pre className="mt-4 text-xs bg-black text-white p-3 rounded-xl overflow-auto">
-              {JSON.stringify(debug, null, 2)}
-            </pre>
           </div>
         )}
 
@@ -475,13 +530,17 @@ export default function Home() {
             <div className="text-sm text-gray-500">
               Faworyt do 1.50 nie wygrywa po 60'
             </div>
-            <div className="text-2xl font-bold mt-1">{favNotWinning1560.length}</div>
+            <div className="text-2xl font-bold mt-1">
+              {favNotWinning1560.length}
+            </div>
           </div>
           <div className="bg-white border rounded-2xl p-4 shadow-sm">
             <div className="text-sm text-gray-500">
               Faworyt do 2.20 + czerwona kartka przeciwnika
             </div>
-            <div className="text-2xl font-bold mt-1">{favNotWinning22Red.length}</div>
+            <div className="text-2xl font-bold mt-1">
+              {favNotWinning22Red.length}
+            </div>
           </div>
           <div className="bg-white border rounded-2xl p-4 shadow-sm">
             <div className="text-sm text-gray-500">Auto refresh</div>
