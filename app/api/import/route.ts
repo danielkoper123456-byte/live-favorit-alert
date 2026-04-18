@@ -35,6 +35,7 @@ type DebugInfo = {
   totalCandidates: number
   batchStart: number
   batchEnd: number
+  version: string
 }
 
 type CachePayload = {
@@ -231,13 +232,19 @@ function buildCachedResponse(
       totalCandidates,
       batchStart,
       batchEnd,
+      version: 'batch-v2',
     },
   }
 }
 
 function rotateBatch<T>(items: T[], start: number, size: number) {
   if (items.length === 0) {
-    return { batch: [] as T[], nextCursor: 0, batchStart: 0, batchEnd: 0 }
+    return {
+      batch: [] as T[],
+      nextCursor: 0,
+      batchStart: 0,
+      batchEnd: 0,
+    }
   }
 
   const normalizedStart = start % items.length
@@ -327,7 +334,7 @@ export async function GET() {
       let odds = null
       try {
         odds = await apiFetch(`/odds?fixture=${c.id}`)
-      } catch {
+      } catch (e: any) {
         odds = null
       }
 
