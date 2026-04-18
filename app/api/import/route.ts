@@ -5,6 +5,7 @@ const MAX_ODDS_REQUESTS = 14
 const CACHE_TTL_MS = 20 * 1000
 
 const WAIT = (ms: number) => new Promise((res) => setTimeout(res, ms))
+const globalAny = globalThis as any
 
 type MatchType =
   | 'fav_losing_15'
@@ -43,21 +44,17 @@ type CachePayload = {
   debug: DebugInfo
 }
 
-declare global {
-  // eslint-disable-next-line no-var
-  var importCache:
-    | {
-        timestamp: number
-        payload: CachePayload
-      }
-    | undefined
-
-  // eslint-disable-next-line no-var
-  var oddsScanState:
-    | {
-        cursor: number
-      }
-    | undefined
+type Candidate = {
+  id: number
+  league: string
+  home: string
+  away: string
+  minute: number
+  score: string
+  homeGoals: number
+  awayGoals: number
+  redCard: string | null
+  priority: number
 }
 
 async function apiFetch(path: string, retries = 2): Promise<any> {
@@ -114,7 +111,7 @@ function isReallyLive(fixture: any) {
   return false
 }
 
-function extractRedCard(item: any, home: string, away: string) {
+function extractRedCard(item: any, home: string, away: string): string | null {
   const events = item?.events || item?.fixture?.events || []
   if (!Array.isArray(events)) return null
 
@@ -130,10 +127,10 @@ function extractRedCard(item: any, home: string, away: string) {
   if (team === home) return home
   if (team === away) return away
 
-  return team
+  return String(team)
 }
 
-function get1X2Odds(odds: any) {
+function get1X2Odds(odds: any): { homeOdd: number; awayOdd: number } | null {
   const response = odds?.response || []
   if (!response.length) return null
 
@@ -178,7 +175,7 @@ function extractFavoriteWithMax(
   home: string,
   away: string,
   maxOdd: number
-) {
+): { team: string; odd: number } | null {
   const parsed = get1X2Odds(odds)
   if (!parsed) return null
 
@@ -195,7 +192,7 @@ function extractFavoriteWithMax(
   return null
 }
 
-function dedupeMatches(matches: AppMatch[]) {
+function dedupeMatches(matches: AppMatch[]): AppMatch[] {
   const map = new Map<string, AppMatch>()
 
   for (const match of matches) {
@@ -205,7 +202,9 @@ function dedupeMatches(matches: AppMatch[]) {
     }
   }
 
-  return Array.from(map.values()).sort((a, b) => b.minute - a.minute)
+  return Array.from(map.values()).sort(
+    (a: AppMatch, b: AppMatch) => b.minute - a.minute
+  )
 }
 
 function buildCachedResponse(
@@ -237,10 +236,19 @@ function buildCachedResponse(
   }
 }
 
-function rotateBatch<T>(items: T[], start: number, size: number) {
+function rotateBatch<T>(
+  items: T[],
+  start: number,
+  size: number
+): {
+  batch: T[]
+  nextCursor: number
+  batchStart: number
+  batchEnd: number
+} {
   if (items.length === 0) {
     return {
-      batch: [] as T[],
+      batch: [],
       nextCursor: 0,
       batchStart: 0,
       batchEnd: 0,
@@ -264,7 +272,9 @@ function rotateBatch<T>(items: T[], start: number, size: number) {
 export async function GET() {
   try {
     const now = Date.now()
-    const existingCache = globalThis.importCache
+    const existingCache = globalAny.importCache as
+      | { timestamp: number; payload: CachePayload }
+      | undefined
 
     if (existingCache && now - existingCache.timestamp < CACHE_TTL_MS) {
       const ageSec = Math.floor((now - existingCache.timestamp) / 1000)
@@ -280,58 +290,64 @@ export async function GET() {
     }
 
     const live = await apiFetch('/fixtures?live=all')
-    const rawFixtures = live?.response || []
+    const rawFixtures = Array.isArray(live?.response) ? live.response : []
     const fixtures = rawFixtures.filter((f: any) => isReallyLive(f))
 
-    const candidates = fixtures
-      .map((f: any) => {
-        const { homeGoals, awayGoals, score } = parseScore(f)
+    const mappedCandidates = fixtures.map((f: any): Candidate | null => {
+      const fixtureId = Number(f?.fixture?.id)
+      if (!fixtureId) return null
 
-        const minute = getMinute(f)
-        const home = f?.teams?.home?.name || 'Home'
-        const away = f?.teams?.away?.name || 'Away'
-        const redCard = extractRedCard(f, home, away)
+      const { homeGoals, awayGoals, score } = parseScore(f)
+      const minute = getMinute(f)
+      const home = String(f?.teams?.home?.name || 'Home')
+      const away = String(f?.teams?.away?.name || 'Away')
+      const redCard = extractRedCard(f, home, away)
 
-        let priority = 0
+      let priority = 0
+      if (homeGoals !== awayGoals) priority += 3
+      if (minute >= 60) priority += 3
+      if (redCard) priority += 4
+      if (minute >= 75) priority += 2
+      if (minute >= 15 && homeGoals !== awayGoals) priority += 1
 
-        if (homeGoals !== awayGoals) priority += 3
-        if (minute >= 60) priority += 3
-        if (redCard) priority += 4
-        if (minute >= 75) priority += 2
-        if (minute >= 15 && homeGoals !== awayGoals) priority += 1
+      return {
+        id: fixtureId,
+        league: String(f?.league?.name || 'Nieznana liga'),
+        home,
+        away,
+        minute,
+        score,
+        homeGoals,
+        awayGoals,
+        redCard,
+        priority,
+      }
+    })
 
-        return {
-          id: f?.fixture?.id,
-          league: f?.league?.name || 'Nieznana liga',
-          home,
-          away,
-          minute,
-          score,
-          homeGoals,
-          awayGoals,
-          redCard,
-          priority,
-        }
-      })
-      .filter((c: any) => !!c.id)
-      .sort((a: any, b: any) => {
+    const candidates: Candidate[] = mappedCandidates
+      .filter((c: Candidate | null): c is Candidate => c !== null)
+      .sort((a: Candidate, b: Candidate) => {
         if (b.priority !== a.priority) return b.priority - a.priority
         return b.minute - a.minute
       })
 
-    const currentCursor = globalThis.oddsScanState?.cursor || 0
+    const currentCursor = Number(globalAny.oddsScanState?.cursor || 0)
 
-    const { batch: oddsCandidates, nextCursor, batchStart, batchEnd } =
-      rotateBatch(candidates, currentCursor, MAX_ODDS_REQUESTS)
+    const {
+      batch: oddsCandidates,
+      nextCursor,
+      batchStart,
+      batchEnd,
+    } = rotateBatch<Candidate>(candidates, currentCursor, MAX_ODDS_REQUESTS)
 
-    globalThis.oddsScanState = { cursor: nextCursor }
+    globalAny.oddsScanState = { cursor: nextCursor }
 
     const matches: AppMatch[] = []
 
     for (const c of oddsCandidates) {
       await WAIT(250)
 
-      let odds = null
+      let odds: any = null
       try {
         odds = await apiFetch(`/odds?fixture=${c.id}`)
       } catch (e: any) {
@@ -424,7 +440,7 @@ export async function GET() {
       batchEnd
     )
 
-    globalThis.importCache = {
+    globalAny.importCache = {
       timestamp: now,
       payload,
     }
