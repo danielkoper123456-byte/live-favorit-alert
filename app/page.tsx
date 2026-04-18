@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import PushControls from '@/components/PushControls'
 
 type MatchType =
   | 'fav_losing_15'
@@ -450,6 +451,10 @@ export default function Home() {
             </div>
           </div>
         </div>
+        <div className="mb-6">
+          <div style={{ color: 'red', fontWeight: 'bold' }}>TEST PUSH</div>
+  <PushControls />
+</div>
 
         {alertText && (
           <div className="mb-6 bg-green-50 border border-green-200 text-green-800 px-4 py-3 rounded-xl">
