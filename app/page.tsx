@@ -7,6 +7,7 @@ type MatchType =
   | 'fav_losing_15'
   | 'fav_not_winning_15_60'
   | 'fav_not_winning_22_red'
+  | 'fav_15_shots_7'
 
 type Match = {
   fixtureId?: number
@@ -20,6 +21,44 @@ type Match = {
   redCard: string | null
   type: MatchType
   isNew?: boolean
+  shotsFavorite?: number | null
+  shotsOpponent?: number | null
+  shotsDiff?: number | null
+}
+
+type HistoryMatch = {
+  id: string
+  run_id: string
+  fixture_id: number
+  league: string
+  home: string
+  away: string
+  minute: number
+  score: string
+  favorite: string
+  odds: number
+  type: MatchType
+  red_card: string | null
+  shots_favorite?: number | null
+  shots_opponent?: number | null
+  shots_diff?: number | null
+  final_score?: string | null
+  final_home_goals?: number | null
+  final_away_goals?: number | null
+  final_status?: string | null
+  outcome?: 'pending' | 'hit' | 'miss' | 'unknown' | null
+  checked_at?: string | null
+  created_at: string
+}
+
+type HistoryRun = {
+  id: string
+  created_at: string
+  source: string
+  live_count: number
+  checked_count: number
+  results_count: number
+  matches: HistoryMatch[]
 }
 
 type DebugInfo = {
@@ -36,17 +75,44 @@ type DebugInfo = {
   version?: string
 }
 
+type ResultsSummary = {
+  checked: number
+  updated: number
+  skipped: number
+  updatedRows?: any[]
+  skippedRows?: any[]
+}
+
+type TypeStats = {
+  type: MatchType | string
+  total: number
+  hit: number
+  miss: number
+  hitRate: number
+}
+
 const AUTO_REFRESH_OPTIONS = [30, 60, 120, 300]
 
 export default function Home() {
   const [matches, setMatches] = useState<Match[]>([])
   const [loading, setLoading] = useState(false)
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [checkingResults, setCheckingResults] = useState(false)
+  const [statsLoading, setStatsLoading] = useState(false)
+
   const [error, setError] = useState('')
+  const [historyError, setHistoryError] = useState('')
+  const [statsError, setStatsError] = useState('')
   const [lastImport, setLastImport] = useState<string | null>(null)
   const [debug, setDebug] = useState<DebugInfo | null>(null)
+  const [resultsSummary, setResultsSummary] = useState<ResultsSummary | null>(null)
+
+  const [stats, setStats] = useState<TypeStats[]>([])
+  const [historyRuns, setHistoryRuns] = useState<HistoryRun[]>([])
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
 
   const [minMinute, setMinMinute] = useState('0')
-  const [autoRefresh, setAutoRefresh] = useState(true)
+  const [autoRefresh, setAutoRefresh] = useState(false)
   const [refreshSeconds, setRefreshSeconds] = useState(60)
   const [browserAlerts, setBrowserAlerts] = useState(false)
 
@@ -73,6 +139,49 @@ export default function Home() {
   const favNotWinning22Red = filteredMatches.filter(
     (m) => m.type === 'fav_not_winning_22_red'
   )
+  const favShots7 = filteredMatches.filter((m) => m.type === 'fav_15_shots_7')
+
+  const selectedRun = historyRuns.find((r) => r.id === selectedRunId) || null
+
+  const formatDateTime = (value: string) => {
+    try {
+      return new Date(value).toLocaleString('pl-PL')
+    } catch {
+      return value
+    }
+  }
+
+  const typeLabel = (type: MatchType | string) => {
+    if (type === 'fav_losing_15') return 'Faworyt do 1.50 przegrywa'
+    if (type === 'fav_not_winning_15_60')
+      return "Faworyt do 1.50 nie wygrywa po 60'"
+    if (type === 'fav_not_winning_22_red')
+      return 'Faworyt do 2.20 + czerwona kartka przeciwnika'
+    if (type === 'fav_15_shots_7')
+      return 'Faworyt ≤1.50 + przewaga strzałów ≥ 7'
+    return String(type)
+  }
+
+  const outcomeLabel = (outcome?: string | null) => {
+    if (outcome === 'hit') return 'HIT ✅'
+    if (outcome === 'miss') return 'MISS ❌'
+    if (outcome === 'pending') return 'PENDING ⏳'
+    if (outcome === 'unknown') return 'UNKNOWN'
+    return 'PENDING ⏳'
+  }
+
+  const outcomeClass = (outcome?: string | null) => {
+    if (outcome === 'hit') return 'text-green-700 bg-green-50 border-green-200'
+    if (outcome === 'miss') return 'text-red-700 bg-red-50 border-red-200'
+    if (outcome === 'unknown') return 'text-gray-700 bg-gray-50 border-gray-200'
+    return 'text-yellow-700 bg-yellow-50 border-yellow-200'
+  }
+
+  const hitRateClass = (hitRate: number) => {
+    if (hitRate >= 70) return 'text-green-700'
+    if (hitRate >= 50) return 'text-yellow-700'
+    return 'text-red-700'
+  }
 
   const playBeep = () => {
     try {
@@ -129,10 +238,83 @@ export default function Home() {
     }
 
     const permission = await Notification.requestPermission()
-    if (permission === 'granted') {
-      setBrowserAlerts(true)
-    } else {
-      setBrowserAlerts(false)
+    setBrowserAlerts(permission === 'granted')
+  }
+
+  const loadHistory = async () => {
+    try {
+      setHistoryLoading(true)
+      setHistoryError('')
+
+      const res = await fetch('/api/history', {
+        cache: 'no-store',
+      })
+
+      const data = await res.json()
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Nie udało się pobrać historii')
+      }
+
+      const runs: HistoryRun[] = data.runs || []
+      setHistoryRuns(runs)
+
+      if (!selectedRunId && runs.length > 0) {
+        setSelectedRunId(runs[0].id)
+      }
+    } catch (err: any) {
+      setHistoryError(err.message || 'Błąd historii')
+    } finally {
+      setHistoryLoading(false)
+    }
+  }
+
+  const loadStats = async () => {
+    try {
+      setStatsLoading(true)
+      setStatsError('')
+
+      const res = await fetch('/api/stats', {
+        cache: 'no-store',
+      })
+
+      const data = await res.json()
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Nie udało się pobrać statystyk')
+      }
+
+      const nextStats: TypeStats[] = data.stats || []
+      setStats(nextStats)
+    } catch (err: any) {
+      setStatsError(err.message || 'Błąd statystyk')
+    } finally {
+      setStatsLoading(false)
+    }
+  }
+
+  const handleCheckResults = async () => {
+    try {
+      setCheckingResults(true)
+      setError('')
+
+      const res = await fetch('/api/results/check', {
+        cache: 'no-store',
+      })
+
+      const data = await res.json()
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Błąd sprawdzania wyników')
+      }
+
+      setResultsSummary(data)
+      await loadHistory()
+      await loadStats()
+    } catch (err: any) {
+      setError(err.message || 'Błąd check results')
+    } finally {
+      setCheckingResults(false)
     }
   }
 
@@ -213,6 +395,8 @@ export default function Home() {
       newBadgeTimerRef.current = setTimeout(() => {
         setMatches((prev) => prev.map((m) => ({ ...m, isNew: false })))
       }, 10000)
+
+      await loadHistory()
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Błąd fetch')
@@ -233,6 +417,7 @@ export default function Home() {
     setError('')
     setLastImport(null)
     setDebug(null)
+    setResultsSummary(null)
     setAlertText('')
     setNewMatchesCount(0)
     seenIdsRef.current = new Set()
@@ -245,6 +430,11 @@ export default function Home() {
       clearTimeout(newBadgeTimerRef.current)
     }
   }
+
+  useEffect(() => {
+    loadHistory()
+    loadStats()
+  }, [])
 
   useEffect(() => {
     if (!autoRefresh) {
@@ -287,7 +477,7 @@ export default function Home() {
     variant,
   }: {
     match: Match
-    variant: 'losing15' | 'notWinning1560' | 'notWinning22Red'
+    variant: 'losing15' | 'notWinning1560' | 'notWinning22Red' | 'shots7'
   }) => (
     <div className="bg-white border rounded-2xl p-4 shadow-sm">
       <div className="flex items-start justify-between gap-3">
@@ -338,6 +528,19 @@ export default function Home() {
           </div>
         )}
 
+        {variant === 'shots7' && (
+          <div className="text-green-700 font-medium">
+            Faworyt ≤1.50 + przewaga strzałów ≥ 7
+          </div>
+        )}
+
+        {match.shotsDiff !== undefined && match.shotsDiff !== null && (
+          <div>
+            Strzały: <b>{match.shotsFavorite}</b> vs{' '}
+            <b>{match.shotsOpponent}</b> (różnica: {match.shotsDiff})
+          </div>
+        )}
+
         {match.redCard && (
           <div className="text-red-700">
             Czerwona kartka: <b>{match.redCard}</b>
@@ -353,9 +556,10 @@ export default function Home() {
         <div className="mb-8">
           <h1 className="text-3xl font-bold">Live Favorit Alert</h1>
           <p className="text-gray-600 mt-2">
-            Pokazuje 3 kategorie: faworyt do 1.50 przegrywa, faworyt do 1.50
-            remisuje lub przegrywa po 60 minucie, oraz faworyt do 2.20
-            remisuje lub przegrywa przy czerwonej kartce przeciwnika.
+            Pokazuje 4 kategorie: faworyt do 1.50 przegrywa, faworyt do 1.50
+            remisuje lub przegrywa po 60 minucie, faworyt do 2.20 remisuje lub
+            przegrywa przy czerwonej kartce przeciwnika oraz faworyt do 1.50 z
+            przewagą strzałów minimum 7.
           </p>
         </div>
 
@@ -364,8 +568,8 @@ export default function Home() {
             <div>
               <div className="text-sm text-gray-500">Sterowanie</div>
               <div className="text-sm mt-1">
-                Import pobiera aktualne mecze z backendu. Auto refresh działa w
-                wybranym interwale.
+                Import pobiera aktualne mecze z backendu. Auto refresh możesz
+                zostawić wyłączony i uruchamiać import ręcznie.
               </div>
 
               {lastImport && (
@@ -434,8 +638,24 @@ export default function Home() {
                 </button>
 
                 <button
+                  onClick={handleCheckResults}
+                  disabled={checkingResults}
+                  className="bg-white border px-6 py-3 rounded-xl font-semibold hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {checkingResults ? 'Sprawdzanie...' : 'Sprawdź wyniki'}
+                </button>
+
+                <button
+                  onClick={loadStats}
+                  disabled={statsLoading}
+                  className="bg-white border px-6 py-3 rounded-xl font-semibold hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {statsLoading ? 'Ładowanie...' : 'Statystyki'}
+                </button>
+
+                <button
                   onClick={handleClear}
-                  disabled={loading}
+                  disabled={loading || checkingResults}
                   className="bg-white border px-6 py-3 rounded-xl font-semibold hover:bg-gray-50 disabled:opacity-50"
                 >
                   Wyczyść
@@ -451,10 +671,11 @@ export default function Home() {
             </div>
           </div>
         </div>
+
         <div className="mb-6">
           <div style={{ color: 'red', fontWeight: 'bold' }}>TEST PUSH</div>
-  <PushControls />
-</div>
+          <PushControls />
+        </div>
 
         {alertText && (
           <div className="mb-6 bg-green-50 border border-green-200 text-green-800 px-4 py-3 rounded-xl">
@@ -463,6 +684,75 @@ export default function Home() {
             <div className="text-sm mt-1">Nowe typy: {newMatchesCount}</div>
           </div>
         )}
+
+        {resultsSummary && (
+          <div className="mb-6 bg-blue-50 border border-blue-200 text-blue-800 px-4 py-3 rounded-xl">
+            <div className="font-semibold">Wyniki sprawdzone</div>
+            <div className="text-sm mt-1">
+              Sprawdzono: {resultsSummary.checked} | Zaktualizowano:{' '}
+              {resultsSummary.updated} | Pominięto: {resultsSummary.skipped}
+            </div>
+          </div>
+        )}
+
+        {statsError && (
+          <div className="mb-6 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl">
+            {statsError}
+          </div>
+        )}
+
+        <section className="mb-6 bg-white border rounded-2xl p-4 shadow-sm">
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <div>
+              <h2 className="text-2xl font-semibold">📊 Skuteczność typów</h2>
+              <p className="text-sm text-gray-500 mt-1">
+                Liczone tylko z rozliczonych rekordów: HIT + MISS. Pending nie wchodzi do procentu.
+              </p>
+            </div>
+
+            <button
+              onClick={loadStats}
+              disabled={statsLoading}
+              className="bg-white border px-4 py-2 rounded-xl font-semibold hover:bg-gray-50 disabled:opacity-50"
+            >
+              {statsLoading ? 'Ładowanie...' : 'Odśwież'}
+            </button>
+          </div>
+
+          {stats.length === 0 ? (
+            <div className="text-sm text-gray-500">
+              Brak rozliczonych danych. Kliknij „Sprawdź wyniki” po zakończeniu meczów.
+            </div>
+          ) : (
+            <div className="grid md:grid-cols-2 xl:grid-cols-4 gap-3">
+              {stats.map((s) => (
+                <div key={s.type} className="border rounded-xl p-4">
+                  <div className="font-semibold">{typeLabel(s.type)}</div>
+
+                  <div className="grid grid-cols-3 gap-2 mt-3 text-sm">
+                    <div className="bg-gray-50 rounded-lg p-2">
+                      <div className="text-gray-500">Total</div>
+                      <div className="font-bold">{s.total}</div>
+                    </div>
+                    <div className="bg-green-50 rounded-lg p-2">
+                      <div className="text-gray-500">Hit</div>
+                      <div className="font-bold text-green-700">{s.hit}</div>
+                    </div>
+                    <div className="bg-red-50 rounded-lg p-2">
+                      <div className="text-gray-500">Miss</div>
+                      <div className="font-bold text-red-700">{s.miss}</div>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 text-sm">
+                    Skuteczność:{' '}
+                    <b className={hitRateClass(s.hitRate)}>{s.hitRate}%</b>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
 
         {debug && (
           <div className="bg-white border rounded-2xl p-4 shadow-sm mb-6">
@@ -526,7 +816,7 @@ export default function Home() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-10">
+        <div className="grid grid-cols-1 sm:grid-cols-5 gap-4 mb-10">
           <div className="bg-white border rounded-2xl p-4 shadow-sm">
             <div className="text-sm text-gray-500">Faworyt do 1.50 przegrywa</div>
             <div className="text-2xl font-bold mt-1">{favLosing15.length}</div>
@@ -546,6 +836,12 @@ export default function Home() {
             <div className="text-2xl font-bold mt-1">
               {favNotWinning22Red.length}
             </div>
+          </div>
+          <div className="bg-white border rounded-2xl p-4 shadow-sm">
+            <div className="text-sm text-gray-500">
+              Faworyt do 1.50 + strzały ≥ 7
+            </div>
+            <div className="text-2xl font-bold mt-1">{favShots7.length}</div>
           </div>
           <div className="bg-white border rounded-2xl p-4 shadow-sm">
             <div className="text-sm text-gray-500">Auto refresh</div>
@@ -599,7 +895,7 @@ export default function Home() {
           )}
         </section>
 
-        <section>
+        <section className="mb-10">
           <h2 className="text-2xl font-semibold mb-4">
             🟠 Faworyt do 2.20 remisuje lub przegrywa, a przeciwnik ma czerwoną kartkę
           </h2>
@@ -619,6 +915,202 @@ export default function Home() {
               ))}
             </div>
           )}
+        </section>
+
+        <section className="mb-10">
+          <h2 className="text-2xl font-semibold mb-4">
+            🟢 Faworyt ≤1.50 + przewaga strzałów ≥ 7
+          </h2>
+
+          {favShots7.length === 0 ? (
+            <div className="bg-white border rounded-2xl p-4 text-gray-500">
+              Brak danych
+            </div>
+          ) : (
+            <div className="grid gap-4">
+              {favShots7.map((match, index) => (
+                <MatchCard
+                  key={`${match.fixtureId || index}-${match.type}`}
+                  match={match}
+                  variant="shots7"
+                />
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="mb-10">
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <div>
+              <h2 className="text-2xl font-semibold">📜 Historia importów</h2>
+              <p className="text-sm text-gray-500 mt-1">
+                Pokazuje zapisane screeningi z Supabase. To nie zużywa API-Football.
+              </p>
+            </div>
+
+            <button
+              onClick={loadHistory}
+              disabled={historyLoading}
+              className="bg-white border px-4 py-2 rounded-xl font-semibold hover:bg-gray-50 disabled:opacity-50"
+            >
+              {historyLoading ? 'Odświeżanie...' : 'Odśwież historię'}
+            </button>
+          </div>
+
+          {historyError && (
+            <div className="mb-4 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl">
+              {historyError}
+            </div>
+          )}
+
+          <div className="grid lg:grid-cols-3 gap-4">
+            <div className="bg-white border rounded-2xl p-4 shadow-sm lg:col-span-1">
+              <div className="font-semibold mb-3">Importy</div>
+
+              {historyRuns.length === 0 ? (
+                <div className="text-sm text-gray-500">Brak historii</div>
+              ) : (
+                <div className="grid gap-2 max-h-[520px] overflow-auto pr-1">
+                  {historyRuns.map((run) => (
+                    <button
+                      key={run.id}
+                      onClick={() => setSelectedRunId(run.id)}
+                      className={`text-left border rounded-xl p-3 hover:bg-gray-50 ${
+                        selectedRunId === run.id
+                          ? 'border-black bg-gray-50'
+                          : 'border-gray-200 bg-white'
+                      }`}
+                    >
+                      <div className="font-semibold text-sm">
+                        {formatDateTime(run.created_at)}
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">
+                        Źródło: {run.source}
+                      </div>
+                      <div className="grid grid-cols-3 gap-2 mt-2 text-xs">
+                        <div>
+                          <span className="text-gray-500">Live</span>
+                          <div className="font-bold">{run.live_count}</div>
+                        </div>
+                        <div>
+                          <span className="text-gray-500">Checked</span>
+                          <div className="font-bold">{run.checked_count}</div>
+                        </div>
+                        <div>
+                          <span className="text-gray-500">Typy</span>
+                          <div className="font-bold">{run.results_count}</div>
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="bg-white border rounded-2xl p-4 shadow-sm lg:col-span-2">
+              <div className="font-semibold mb-3">Szczegóły importu</div>
+
+              {!selectedRun ? (
+                <div className="text-sm text-gray-500">
+                  Wybierz import z listy.
+                </div>
+              ) : (
+                <>
+                  <div className="grid sm:grid-cols-4 gap-3 text-sm mb-4">
+                    <div className="bg-gray-50 rounded-xl p-3">
+                      <div className="text-gray-500">Godzina</div>
+                      <div className="font-bold">
+                        {formatDateTime(selectedRun.created_at)}
+                      </div>
+                    </div>
+                    <div className="bg-gray-50 rounded-xl p-3">
+                      <div className="text-gray-500">Live</div>
+                      <div className="font-bold">{selectedRun.live_count}</div>
+                    </div>
+                    <div className="bg-gray-50 rounded-xl p-3">
+                      <div className="text-gray-500">Checked</div>
+                      <div className="font-bold">{selectedRun.checked_count}</div>
+                    </div>
+                    <div className="bg-gray-50 rounded-xl p-3">
+                      <div className="text-gray-500">Typy</div>
+                      <div className="font-bold">{selectedRun.results_count}</div>
+                    </div>
+                  </div>
+
+                  {selectedRun.matches.length === 0 ? (
+                    <div className="border rounded-xl p-4 text-gray-500">
+                      W tym imporcie nie było typów.
+                    </div>
+                  ) : (
+                    <div className="grid gap-3">
+                      {selectedRun.matches.map((m) => (
+                        <div key={m.id} className="border rounded-xl p-4">
+                          <div className="flex justify-between gap-3">
+                            <div>
+                              <div className="font-semibold">
+                                {m.home} vs {m.away}
+                              </div>
+                              <div className="text-sm text-gray-500">
+                                {m.league}
+                              </div>
+                            </div>
+
+                            <div className="flex flex-col items-end gap-2">
+                              <div className="text-sm font-semibold bg-gray-100 px-3 py-1 rounded-full h-fit">
+                                {m.minute}'
+                              </div>
+                              <div
+                                className={`text-xs font-bold border px-2 py-1 rounded-full ${outcomeClass(
+                                  m.outcome
+                                )}`}
+                              >
+                                {outcomeLabel(m.outcome)}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="grid gap-1 mt-3 text-sm">
+                            <div>
+                              Wynik przy imporcie: <b>{m.score}</b>
+                            </div>
+                            {m.final_score && (
+                              <div>
+                                Finalny wynik: <b>{m.final_score}</b>
+                              </div>
+                            )}
+                            <div>
+                              Faworyt: <b>{m.favorite}</b> ({m.odds})
+                            </div>
+                            <div className="font-medium">
+                              {typeLabel(m.type)}
+                            </div>
+                            {m.shots_diff !== undefined &&
+                              m.shots_diff !== null && (
+                                <div>
+                                  Strzały: <b>{m.shots_favorite}</b> vs{' '}
+                                  <b>{m.shots_opponent}</b> (różnica:{' '}
+                                  {m.shots_diff})
+                                </div>
+                              )}
+                            {m.red_card && (
+                              <div className="text-red-700">
+                                Czerwona kartka: <b>{m.red_card}</b>
+                              </div>
+                            )}
+                            {m.checked_at && (
+                              <div className="text-xs text-gray-500 mt-1">
+                                Sprawdzone: {formatDateTime(m.checked_at)}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
         </section>
       </div>
     </main>

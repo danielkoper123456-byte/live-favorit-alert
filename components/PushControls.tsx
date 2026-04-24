@@ -39,7 +39,7 @@ export default function PushControls() {
 
       const permission = await Notification.requestPermission()
       if (permission !== 'granted') {
-        setMessage('Powiadomienia nie zostały zaakceptowane.')
+        setMessage(`Powiadomienia nie zostały zaakceptowane. permission=${permission}`)
         return
       }
 
@@ -128,6 +128,29 @@ export default function PushControls() {
     }
   }
 
+  const sendAlerts = async () => {
+    try {
+      setBusy(true)
+      setMessage('')
+
+      const res = await fetch('/api/push/alerts', {
+        method: 'POST',
+      })
+
+      const data = await res.json()
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Nie udało się wysłać alertów')
+      }
+
+      setMessage(`Wysłano alerty: ${data.sent ?? 0}`)
+    } catch (e: any) {
+      setMessage(e?.message || 'Błąd wysyłki alertów')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   if (!supported) {
     return (
       <div className="text-sm text-red-600">
@@ -163,6 +186,14 @@ export default function PushControls() {
           className="bg-white border px-6 py-3 rounded-xl font-semibold disabled:opacity-50"
         >
           Wyślij test push
+        </button>
+
+        <button
+          onClick={sendAlerts}
+          disabled={busy || !subscribed}
+          className="bg-white border px-6 py-3 rounded-xl font-semibold disabled:opacity-50"
+        >
+          Wyślij alerty (realne)
         </button>
       </div>
 

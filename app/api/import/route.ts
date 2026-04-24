@@ -1,16 +1,26 @@
 import { NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
 
 const API_BASE = 'https://v3.football.api-sports.io'
-const MAX_ODDS_REQUESTS = 14
+const MAX_ODDS_REQUESTS = 100
 const CACHE_TTL_MS = 20 * 1000
 
 const WAIT = (ms: number) => new Promise((res) => setTimeout(res, ms))
 const globalAny = globalThis as any
 
+const supabaseUrl = process.env.SUPABASE_URL
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+const supabase =
+  supabaseUrl && supabaseServiceRoleKey
+    ? createClient(supabaseUrl, supabaseServiceRoleKey)
+    : null
+
 type MatchType =
   | 'fav_losing_15'
   | 'fav_not_winning_15_60'
   | 'fav_not_winning_22_red'
+  | 'fav_15_shots_7'
 
 type AppMatch = {
   fixtureId: number
@@ -23,6 +33,9 @@ type AppMatch = {
   odds: number
   redCard: string | null
   type: MatchType
+  shotsFavorite?: number | null
+  shotsOpponent?: number | null
+  shotsDiff?: number | null
 }
 
 type DebugInfo = {
@@ -37,6 +50,7 @@ type DebugInfo = {
   batchStart: number
   batchEnd: number
   version: string
+  runId?: string | null
 }
 
 type CachePayload = {
@@ -192,6 +206,44 @@ function extractFavoriteWithMax(
   return null
 }
 
+async function getShots(fixtureId: number) {
+  try {
+    const data = await apiFetch(`/fixtures/statistics?fixture=${fixtureId}`)
+    const stats = data?.response
+
+    if (!Array.isArray(stats) || stats.length < 2) return null
+
+    const getVal = (arr: any[], name: string) => {
+      const found = arr.find((s) => s.type === name)
+      const raw = found?.value
+
+      if (raw === null || raw === undefined) return 0
+      if (typeof raw === 'number') return raw
+
+      const parsed = Number(String(raw).replace('%', '').trim())
+      return Number.isFinite(parsed) ? parsed : 0
+    }
+
+    const home = stats[0]
+    const away = stats[1]
+
+    const homeShots =
+      getVal(home.statistics || [], 'Shots on Goal') +
+      getVal(home.statistics || [], 'Shots off Goal')
+
+    const awayShots =
+      getVal(away.statistics || [], 'Shots on Goal') +
+      getVal(away.statistics || [], 'Shots off Goal')
+
+    return {
+      homeShots,
+      awayShots,
+    }
+  } catch {
+    return null
+  }
+}
+
 function dedupeMatches(matches: AppMatch[]): AppMatch[] {
   const map = new Map<string, AppMatch>()
 
@@ -216,7 +268,8 @@ function buildCachedResponse(
   cacheAgeSec: number,
   totalCandidates: number,
   batchStart: number,
-  batchEnd: number
+  batchEnd: number,
+  runId: string | null
 ): CachePayload {
   return {
     matches,
@@ -231,47 +284,129 @@ function buildCachedResponse(
       totalCandidates,
       batchStart,
       batchEnd,
-      version: 'batch-v2',
+      version: 'full-screening-shots-dedupe-v1',
+      runId,
     },
   }
 }
 
-function rotateBatch<T>(
-  items: T[],
-  start: number,
-  size: number
-): {
-  batch: T[]
-  nextCursor: number
-  batchStart: number
-  batchEnd: number
-} {
-  if (items.length === 0) {
+async function createScreeningRun(source: 'manual' | 'cron') {
+  if (!supabase) return null
+
+  const { data, error } = await supabase
+    .from('screening_runs')
+    .insert({
+      source,
+      live_count: 0,
+      checked_count: 0,
+      results_count: 0,
+    })
+    .select('id')
+    .single()
+
+  if (error) {
+    console.error('createScreeningRun error:', error)
+    return null
+  }
+
+  return data?.id || null
+}
+
+async function updateScreeningRun(
+  runId: string | null,
+  values: {
+    live_count?: number
+    checked_count?: number
+    results_count?: number
+  }
+) {
+  if (!supabase || !runId) return
+
+  const { error } = await supabase
+    .from('screening_runs')
+    .update(values)
+    .eq('id', runId)
+
+  if (error) {
+    console.error('updateScreeningRun error:', error)
+  }
+}
+
+async function saveScreeningMatches(runId: string | null, matches: AppMatch[]) {
+  if (!supabase || !runId || matches.length === 0) {
     return {
-      batch: [],
-      nextCursor: 0,
-      batchStart: 0,
-      batchEnd: 0,
+      inserted: 0,
+      skippedDuplicates: 0,
     }
   }
 
-  const normalizedStart = start % items.length
-  const batch: T[] = []
+  const { data: existing, error: fetchError } = await supabase
+    .from('screening_matches')
+    .select('fixture_id, type')
+    .eq('outcome', 'pending')
 
-  for (let i = 0; i < Math.min(size, items.length); i++) {
-    batch.push(items[(normalizedStart + i) % items.length])
+  if (fetchError) {
+    console.error('fetch existing pending matches error:', fetchError)
+
+    return {
+      inserted: 0,
+      skippedDuplicates: 0,
+    }
   }
 
-  const nextCursor = (normalizedStart + batch.length) % items.length
-  const batchStart = normalizedStart + 1
-  const batchEnd = normalizedStart + batch.length
+  const existingSet = new Set(
+    (existing || []).map((e) => `${e.fixture_id}-${e.type}`)
+  )
 
-  return { batch, nextCursor, batchStart, batchEnd }
+  const newMatches = matches.filter(
+    (m) => !existingSet.has(`${m.fixtureId}-${m.type}`)
+  )
+
+  if (newMatches.length === 0) {
+    return {
+      inserted: 0,
+      skippedDuplicates: matches.length,
+    }
+  }
+
+  const rows = newMatches.map((m) => ({
+    run_id: runId,
+    fixture_id: m.fixtureId,
+    league: m.league,
+    home: m.home,
+    away: m.away,
+    minute: m.minute,
+    score: m.score,
+    favorite: m.favorite,
+    odds: m.odds,
+    type: m.type,
+    red_card: m.redCard,
+    shots_favorite: m.shotsFavorite ?? null,
+    shots_opponent: m.shotsOpponent ?? null,
+    shots_diff: m.shotsDiff ?? null,
+  }))
+
+  const { error } = await supabase.from('screening_matches').insert(rows)
+
+  if (error) {
+    console.error('saveScreeningMatches error:', error)
+
+    return {
+      inserted: 0,
+      skippedDuplicates: matches.length - newMatches.length,
+    }
+  }
+
+  return {
+    inserted: rows.length,
+    skippedDuplicates: matches.length - newMatches.length,
+  }
 }
 
 export async function GET() {
   try {
     const now = Date.now()
+
     const existingCache = globalAny.importCache as
       | { timestamp: number; payload: CachePayload }
       | undefined
@@ -289,9 +424,15 @@ export async function GET() {
       })
     }
 
+    const runId = await createScreeningRun('manual')
+
     const live = await apiFetch('/fixtures?live=all')
     const rawFixtures = Array.isArray(live?.response) ? live.response : []
     const fixtures = rawFixtures.filter((f: any) => isReallyLive(f))
+
+    await updateScreeningRun(runId, {
+      live_count: fixtures.length,
+    })
 
     const mappedCandidates = fixtures.map((f: any): Candidate | null => {
       const fixtureId = Number(f?.fixture?.id)
@@ -331,16 +472,13 @@ export async function GET() {
         return b.minute - a.minute
       })
 
-    const currentCursor = Number(globalAny.oddsScanState?.cursor || 0)
+    const oddsCandidates = candidates.slice(0, MAX_ODDS_REQUESTS)
+    const batchStart = oddsCandidates.length > 0 ? 1 : 0
+    const batchEnd = oddsCandidates.length
 
-    const {
-      batch: oddsCandidates,
-      nextCursor,
-      batchStart,
-      batchEnd,
-    } = rotateBatch<Candidate>(candidates, currentCursor, MAX_ODDS_REQUESTS)
-
-    globalAny.oddsScanState = { cursor: nextCursor }
+    await updateScreeningRun(runId, {
+      checked_count: oddsCandidates.length,
+    })
 
     const matches: AppMatch[] = []
 
@@ -348,9 +486,10 @@ export async function GET() {
       await WAIT(250)
 
       let odds: any = null
+
       try {
         odds = await apiFetch(`/odds?fixture=${c.id}`)
-      } catch (e: any) {
+      } catch {
         odds = null
       }
 
@@ -380,6 +519,9 @@ export async function GET() {
             odds: fav15.odd,
             redCard: c.redCard,
             type: 'fav_losing_15',
+            shotsFavorite: null,
+            shotsOpponent: null,
+            shotsDiff: null,
           })
         }
 
@@ -395,7 +537,38 @@ export async function GET() {
             odds: fav15.odd,
             redCard: c.redCard,
             type: 'fav_not_winning_15_60',
+            shotsFavorite: null,
+            shotsOpponent: null,
+            shotsDiff: null,
           })
+        }
+
+        await WAIT(200)
+
+        const shots = await getShots(c.id)
+
+        if (shots) {
+          const favShots = favoriteIsHome ? shots.homeShots : shots.awayShots
+          const oppShots = favoriteIsHome ? shots.awayShots : shots.homeShots
+          const diff = favShots - oppShots
+
+          if (diff >= 7) {
+            matches.push({
+              fixtureId: c.id,
+              league: c.league,
+              home: c.home,
+              away: c.away,
+              minute: c.minute,
+              score: c.score,
+              favorite: fav15.team,
+              odds: fav15.odd,
+              redCard: c.redCard,
+              type: 'fav_15_shots_7',
+              shotsFavorite: favShots,
+              shotsOpponent: oppShots,
+              shotsDiff: diff,
+            })
+          }
         }
       }
 
@@ -421,12 +594,21 @@ export async function GET() {
             odds: fav22.odd,
             redCard: c.redCard,
             type: 'fav_not_winning_22_red',
+            shotsFavorite: null,
+            shotsOpponent: null,
+            shotsDiff: null,
           })
         }
       }
     }
 
     const finalMatches = dedupeMatches(matches)
+
+    const saveResult = await saveScreeningMatches(runId, finalMatches)
+
+    await updateScreeningRun(runId, {
+      results_count: saveResult.inserted,
+    })
 
     const payload = buildCachedResponse(
       finalMatches,
@@ -437,15 +619,21 @@ export async function GET() {
       0,
       candidates.length,
       batchStart,
-      batchEnd
+      batchEnd,
+      runId
     )
+
+    payload.debug.results = finalMatches.length
 
     globalAny.importCache = {
       timestamp: now,
       payload,
     }
 
-    return NextResponse.json(payload)
+    return NextResponse.json({
+      ...payload,
+      save: saveResult,
+    })
   } catch (e: any) {
     return NextResponse.json(
       { error: e?.message || 'Import failed' },
