@@ -7,7 +7,7 @@ type MatchType =
   | 'fav_losing_15'
   | 'fav_not_winning_15_60'
   | 'fav_not_winning_22_red'
-  | 'fav_15_shots_7'
+  | 'fav_18_not_winning_shots_7'
 
 type Match = {
   fixtureId?: number
@@ -24,6 +24,17 @@ type Match = {
   shotsFavorite?: number | null
   shotsOpponent?: number | null
   shotsDiff?: number | null
+  favoriteRank?: number | null
+  favoritePoints?: number | null
+  favoriteGoalsFor?: number | null
+  favoriteGoalsAgainst?: number | null
+  opponentRank?: number | null
+  opponentPoints?: number | null
+  opponentGoalsFor?: number | null
+  opponentGoalsAgainst?: number | null
+  favoriteForm?: string | null
+  opponentForm?: string | null
+  liveOdd?: number | null
 }
 
 type HistoryMatch = {
@@ -49,16 +60,17 @@ type HistoryMatch = {
   outcome?: 'pending' | 'hit' | 'miss' | 'unknown' | null
   checked_at?: string | null
   created_at: string
-}
-
-type HistoryRun = {
-  id: string
-  created_at: string
-  source: string
-  live_count: number
-  checked_count: number
-  results_count: number
-  matches: HistoryMatch[]
+  favorite_rank?: number | null
+  favorite_points?: number | null
+  favorite_goals_for?: number | null
+  favorite_goals_against?: number | null
+  opponent_rank?: number | null
+  opponent_points?: number | null
+  opponent_goals_for?: number | null
+  opponent_goals_against?: number | null
+  favorite_form?: string | null
+  opponent_form?: string | null
+  live_odd?: number | null
 }
 
 type DebugInfo = {
@@ -88,7 +100,10 @@ type TypeStats = {
   total: number
   hit: number
   miss: number
+  pending: number
+  unknown: number
   hitRate: number
+  matches: HistoryMatch[]
 }
 
 const AUTO_REFRESH_OPTIONS = [30, 60, 120, 300]
@@ -96,22 +111,20 @@ const AUTO_REFRESH_OPTIONS = [30, 60, 120, 300]
 export default function Home() {
   const [matches, setMatches] = useState<Match[]>([])
   const [loading, setLoading] = useState(false)
-  const [historyLoading, setHistoryLoading] = useState(false)
   const [checkingResults, setCheckingResults] = useState(false)
   const [statsLoading, setStatsLoading] = useState(false)
 
   const [error, setError] = useState('')
-  const [historyError, setHistoryError] = useState('')
   const [statsError, setStatsError] = useState('')
   const [lastImport, setLastImport] = useState<string | null>(null)
   const [debug, setDebug] = useState<DebugInfo | null>(null)
   const [resultsSummary, setResultsSummary] = useState<ResultsSummary | null>(null)
 
   const [stats, setStats] = useState<TypeStats[]>([])
-  const [historyRuns, setHistoryRuns] = useState<HistoryRun[]>([])
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
+  const [selectedStatsType, setSelectedStatsType] = useState<string | null>(null)
 
   const [minMinute, setMinMinute] = useState('0')
+  const [maxMinute, setMaxMinute] = useState('75')
   const [autoRefresh, setAutoRefresh] = useState(false)
   const [refreshSeconds, setRefreshSeconds] = useState(60)
   const [browserAlerts, setBrowserAlerts] = useState(false)
@@ -125,12 +138,13 @@ export default function Home() {
   const newBadgeTimerRef = useRef<NodeJS.Timeout | null>(null)
 
   const numericMinMinute = Number(minMinute) || 0
+  const numericMaxMinute = Number(maxMinute) || 90
 
   const filteredMatches = useMemo(() => {
     return matches
-      .filter((m) => m.minute >= numericMinMinute)
+      .filter((m) => m.minute >= numericMinMinute && m.minute <= numericMaxMinute)
       .sort((a, b) => b.minute - a.minute)
-  }, [matches, numericMinMinute])
+  }, [matches, numericMinMinute, numericMaxMinute])
 
   const favLosing15 = filteredMatches.filter((m) => m.type === 'fav_losing_15')
   const favNotWinning1560 = filteredMatches.filter(
@@ -139,9 +153,9 @@ export default function Home() {
   const favNotWinning22Red = filteredMatches.filter(
     (m) => m.type === 'fav_not_winning_22_red'
   )
-  const favShots7 = filteredMatches.filter((m) => m.type === 'fav_15_shots_7')
+  const favShots7 = filteredMatches.filter((m) => m.type === 'fav_18_not_winning_shots_7')
 
-  const selectedRun = historyRuns.find((r) => r.id === selectedRunId) || null
+  const selectedStats = stats.find((s) => s.type === selectedStatsType) || null
 
   const formatDateTime = (value: string) => {
     try {
@@ -157,9 +171,13 @@ export default function Home() {
       return "Faworyt do 1.50 nie wygrywa po 60'"
     if (type === 'fav_not_winning_22_red')
       return 'Faworyt do 2.20 + czerwona kartka przeciwnika'
-    if (type === 'fav_15_shots_7')
-      return 'Faworyt ≤1.50 + przewaga strzałów ≥ 7'
+    if (type === 'fav_18_not_winning_shots_7')
+      return 'Faworyt ≤1.80 nie wygrywa + strzały ≥ 7'
     return String(type)
+  }
+
+  const getOpponentName = (home: string, away: string, favorite: string) => {
+    return favorite === home ? away : home
   }
 
   const outcomeLabel = (outcome?: string | null) => {
@@ -241,34 +259,6 @@ export default function Home() {
     setBrowserAlerts(permission === 'granted')
   }
 
-  const loadHistory = async () => {
-    try {
-      setHistoryLoading(true)
-      setHistoryError('')
-
-      const res = await fetch('/api/history', {
-        cache: 'no-store',
-      })
-
-      const data = await res.json()
-
-      if (!res.ok) {
-        throw new Error(data.error || 'Nie udało się pobrać historii')
-      }
-
-      const runs: HistoryRun[] = data.runs || []
-      setHistoryRuns(runs)
-
-      if (!selectedRunId && runs.length > 0) {
-        setSelectedRunId(runs[0].id)
-      }
-    } catch (err: any) {
-      setHistoryError(err.message || 'Błąd historii')
-    } finally {
-      setHistoryLoading(false)
-    }
-  }
-
   const loadStats = async () => {
     try {
       setStatsLoading(true)
@@ -286,6 +276,10 @@ export default function Home() {
 
       const nextStats: TypeStats[] = data.stats || []
       setStats(nextStats)
+
+      if (!selectedStatsType && nextStats.length > 0) {
+        setSelectedStatsType(String(nextStats[0].type))
+      }
     } catch (err: any) {
       setStatsError(err.message || 'Błąd statystyk')
     } finally {
@@ -309,7 +303,6 @@ export default function Home() {
       }
 
       setResultsSummary(data)
-      await loadHistory()
       await loadStats()
     } catch (err: any) {
       setError(err.message || 'Błąd check results')
@@ -396,7 +389,7 @@ export default function Home() {
         setMatches((prev) => prev.map((m) => ({ ...m, isNew: false })))
       }, 10000)
 
-      await loadHistory()
+      await loadStats()
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Błąd fetch')
@@ -432,7 +425,6 @@ export default function Home() {
   }
 
   useEffect(() => {
-    loadHistory()
     loadStats()
   }, [])
 
@@ -472,83 +464,258 @@ export default function Home() {
     }
   }, [])
 
+  const ContextBlock = ({
+    favorite,
+    opponent,
+    favoriteRank,
+    favoritePoints,
+    favoriteGoalsFor,
+    favoriteGoalsAgainst,
+    opponentRank,
+    opponentPoints,
+    opponentGoalsFor,
+    opponentGoalsAgainst,
+    favoriteForm,
+    opponentForm,
+    liveOdd,
+  }: {
+    favorite: string
+    opponent: string
+    favoriteRank?: number | null
+    favoritePoints?: number | null
+    favoriteGoalsFor?: number | null
+    favoriteGoalsAgainst?: number | null
+    opponentRank?: number | null
+    opponentPoints?: number | null
+    opponentGoalsFor?: number | null
+    opponentGoalsAgainst?: number | null
+    favoriteForm?: string | null
+    opponentForm?: string | null
+    liveOdd?: number | null
+  }) => {
+    const hasTable = favoriteRank || opponentRank
+    const hasForm = favoriteForm || opponentForm
+    const hasLiveOdd = liveOdd !== undefined && liveOdd !== null
+
+    if (!hasTable && !hasForm && !hasLiveOdd) return null
+
+    return (
+      <div className="mt-2 border rounded-xl p-3 bg-gray-50">
+        <div className="font-semibold text-sm mb-2">Kontekst meczu</div>
+
+        {hasLiveOdd && (
+          <div>
+            Kurs live faworyta: <b>{liveOdd}</b>
+          </div>
+        )}
+
+        {hasTable && (
+          <div className="grid gap-1 mt-2">
+            {favoriteRank && (
+              <div>
+                <b>{favorite}</b>: {favoriteRank}. miejsce, {favoritePoints ?? '-'} pkt,
+                bramki {favoriteGoalsFor ?? '-'}:{favoriteGoalsAgainst ?? '-'}
+              </div>
+            )}
+
+            {opponentRank && (
+              <div>
+                <b>{opponent}</b>: {opponentRank}. miejsce, {opponentPoints ?? '-'} pkt,
+                bramki {opponentGoalsFor ?? '-'}:{opponentGoalsAgainst ?? '-'}
+              </div>
+            )}
+          </div>
+        )}
+
+        {hasForm && (
+          <div className="mt-2">
+            Forma: <b>{favoriteForm ?? '-'}</b> vs <b>{opponentForm ?? '-'}</b>
+          </div>
+        )}
+      </div>
+    )
+  }
+
   const MatchCard = ({
     match,
     variant,
   }: {
     match: Match
     variant: 'losing15' | 'notWinning1560' | 'notWinning22Red' | 'shots7'
-  }) => (
-    <div className="bg-white border rounded-2xl p-4 shadow-sm">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <div className="font-semibold text-lg">
-              {match.home} vs {match.away}
+  }) => {
+    const opponent = getOpponentName(match.home, match.away, match.favorite)
+
+    return (
+      <div className="bg-white border rounded-2xl p-4 shadow-sm">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="font-semibold text-lg">
+                {match.home} vs {match.away}
+              </div>
+
+              {match.isNew && (
+                <span className="text-xs font-bold text-green-700 bg-green-100 px-2 py-1 rounded-full">
+                  NOWY
+                </span>
+              )}
             </div>
 
-            {match.isNew && (
-              <span className="text-xs font-bold text-green-700 bg-green-100 px-2 py-1 rounded-full">
-                NOWY
-              </span>
-            )}
+            <div className="text-sm text-gray-500">{match.league}</div>
           </div>
 
-          <div className="text-sm text-gray-500">{match.league}</div>
+          <div className="text-sm font-semibold bg-gray-100 px-3 py-1 rounded-full whitespace-nowrap">
+            {match.minute}'
+          </div>
         </div>
 
-        <div className="text-sm font-semibold bg-gray-100 px-3 py-1 rounded-full whitespace-nowrap">
-          {match.minute}'
-        </div>
-      </div>
-
-      <div className="mt-4 grid gap-2 text-sm">
-        <div>
-          Wynik: <b>{match.score}</b>
-        </div>
-        <div>
-          Faworyt: <b>{match.favorite}</b> ({match.odds})
-        </div>
-
-        {variant === 'losing15' && (
-          <div className="text-red-700 font-medium">
-            Faworyt do 1.50 przegrywa
-          </div>
-        )}
-
-        {variant === 'notWinning1560' && (
-          <div className="text-yellow-700 font-medium">
-            Faworyt do 1.50 remisuje lub przegrywa po 60 minucie
-          </div>
-        )}
-
-        {variant === 'notWinning22Red' && (
-          <div className="text-orange-700 font-medium">
-            Faworyt do 2.20 remisuje lub przegrywa, a przeciwnik ma czerwoną kartkę
-          </div>
-        )}
-
-        {variant === 'shots7' && (
-          <div className="text-green-700 font-medium">
-            Faworyt ≤1.50 + przewaga strzałów ≥ 7
-          </div>
-        )}
-
-        {match.shotsDiff !== undefined && match.shotsDiff !== null && (
+        <div className="mt-4 grid gap-2 text-sm">
           <div>
-            Strzały: <b>{match.shotsFavorite}</b> vs{' '}
-            <b>{match.shotsOpponent}</b> (różnica: {match.shotsDiff})
+            Wynik: <b>{match.score}</b>
           </div>
-        )}
+          <div>
+            Faworyt: <b>{match.favorite}</b> ({match.odds})
+          </div>
 
-        {match.redCard && (
-          <div className="text-red-700">
-            Czerwona kartka: <b>{match.redCard}</b>
-          </div>
-        )}
+          <ContextBlock
+            favorite={match.favorite}
+            opponent={opponent}
+            favoriteRank={match.favoriteRank}
+            favoritePoints={match.favoritePoints}
+            favoriteGoalsFor={match.favoriteGoalsFor}
+            favoriteGoalsAgainst={match.favoriteGoalsAgainst}
+            opponentRank={match.opponentRank}
+            opponentPoints={match.opponentPoints}
+            opponentGoalsFor={match.opponentGoalsFor}
+            opponentGoalsAgainst={match.opponentGoalsAgainst}
+            favoriteForm={match.favoriteForm}
+            opponentForm={match.opponentForm}
+            liveOdd={match.liveOdd}
+          />
+
+          {variant === 'losing15' && (
+            <div className="text-red-700 font-medium">
+              Faworyt do 1.50 przegrywa
+            </div>
+          )}
+
+          {variant === 'notWinning1560' && (
+            <div className="text-yellow-700 font-medium">
+              Faworyt do 1.50 remisuje lub przegrywa po 60 minucie
+            </div>
+          )}
+
+          {variant === 'notWinning22Red' && (
+            <div className="text-orange-700 font-medium">
+              Faworyt do 2.20 remisuje lub przegrywa, a przeciwnik ma czerwoną kartkę
+            </div>
+          )}
+
+          {variant === 'shots7' && (
+            <div className="text-green-700 font-medium">
+              Faworyt ≤1.80 nie wygrywa + strzały ≥ 7
+            </div>
+          )}
+
+          {match.shotsDiff !== undefined && match.shotsDiff !== null && (
+            <div>
+              Strzały: <b>{match.shotsFavorite}</b> vs{' '}
+              <b>{match.shotsOpponent}</b> (różnica: {match.shotsDiff})
+            </div>
+          )}
+
+          {match.redCard && (
+            <div className="text-red-700">
+              Czerwona kartka: <b>{match.redCard}</b>
+            </div>
+          )}
+        </div>
       </div>
-    </div>
-  )
+    )
+  }
+
+  const HistoryMatchCard = ({ m }: { m: HistoryMatch }) => {
+    const opponent = getOpponentName(m.home, m.away, m.favorite)
+
+    return (
+      <div className="border rounded-xl p-4 bg-white">
+        <div className="flex justify-between gap-3">
+          <div>
+            <div className="font-semibold">
+              {m.home} vs {m.away}
+            </div>
+            <div className="text-sm text-gray-500">{m.league}</div>
+          </div>
+
+          <div className="flex flex-col items-end gap-2">
+            <div className="text-sm font-semibold bg-gray-100 px-3 py-1 rounded-full h-fit">
+              {m.minute}'
+            </div>
+            <div
+              className={`text-xs font-bold border px-2 py-1 rounded-full ${outcomeClass(
+                m.outcome
+              )}`}
+            >
+              {outcomeLabel(m.outcome)}
+            </div>
+          </div>
+        </div>
+
+        <div className="grid gap-1 mt-3 text-sm">
+          <div>
+            Wynik przy imporcie/live: <b>{m.score}</b>
+          </div>
+          {m.final_score ? (
+            <div>
+              Wynik końcowy: <b>{m.final_score}</b>
+            </div>
+          ) : (
+            <div className="text-gray-500">Wynik końcowy: jeszcze brak</div>
+          )}
+          <div>
+            Faworyt: <b>{m.favorite}</b> ({m.odds})
+          </div>
+
+          <ContextBlock
+            favorite={m.favorite}
+            opponent={opponent}
+            favoriteRank={m.favorite_rank}
+            favoritePoints={m.favorite_points}
+            favoriteGoalsFor={m.favorite_goals_for}
+            favoriteGoalsAgainst={m.favorite_goals_against}
+            opponentRank={m.opponent_rank}
+            opponentPoints={m.opponent_points}
+            opponentGoalsFor={m.opponent_goals_for}
+            opponentGoalsAgainst={m.opponent_goals_against}
+            favoriteForm={m.favorite_form}
+            opponentForm={m.opponent_form}
+            liveOdd={m.live_odd}
+          />
+
+          <div className="font-medium">{typeLabel(m.type)}</div>
+          {m.shots_diff !== undefined && m.shots_diff !== null && (
+            <div>
+              Strzały: <b>{m.shots_favorite}</b> vs <b>{m.shots_opponent}</b>{' '}
+              (różnica: {m.shots_diff})
+            </div>
+          )}
+          {m.red_card && (
+            <div className="text-red-700">
+              Czerwona kartka: <b>{m.red_card}</b>
+            </div>
+          )}
+          <div className="text-xs text-gray-500 mt-1">
+            Znaleziono: {formatDateTime(m.created_at)}
+          </div>
+          {m.checked_at && (
+            <div className="text-xs text-gray-500">
+              Sprawdzone: {formatDateTime(m.checked_at)}
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <main className="min-h-screen bg-gray-50">
@@ -559,28 +726,33 @@ export default function Home() {
             Pokazuje 4 kategorie: faworyt do 1.50 przegrywa, faworyt do 1.50
             remisuje lub przegrywa po 60 minucie, faworyt do 2.20 remisuje lub
             przegrywa przy czerwonej kartce przeciwnika oraz faworyt do 1.50 z
-            przewagą strzałów minimum 7.
+            kursem do 1.80, który remisuje lub przegrywa i ma przewagę strzałów minimum 7.
           </p>
         </div>
 
-        <div className="bg-white border rounded-2xl p-4 shadow-sm mb-6">
-          <div className="grid md:grid-cols-2 gap-6">
+        <div className="bg-white border rounded-3xl p-5 shadow-sm mb-6">
+          <div className="flex items-start justify-between gap-4 mb-5">
             <div>
-              <div className="text-sm text-gray-500">Sterowanie</div>
-              <div className="text-sm mt-1">
-                Import pobiera aktualne mecze z backendu. Auto refresh możesz
-                zostawić wyłączony i uruchamiać import ręcznie.
+              <div className="text-sm text-gray-500">Panel sterowania</div>
+              <h2 className="text-xl font-bold mt-1">Live screening</h2>
+              <div className="text-sm text-gray-600 mt-1">
+                Uruchamiasz import ręcznie, sprawdzasz wyniki i filtrujesz typy po minucie meczu.
               </div>
-
-              {lastImport && (
-                <div className="text-sm text-gray-500 mt-2">
-                  Ostatni import: {lastImport}
-                </div>
-              )}
             </div>
 
-            <div className="flex flex-col gap-4">
-              <div className="grid sm:grid-cols-2 gap-3">
+            <div className="text-right">
+              <div className="text-xs text-gray-500">Ostatni import</div>
+              <div className="font-bold text-lg">
+                {lastImport || 'brak'}
+              </div>
+            </div>
+          </div>
+
+          <div className="grid lg:grid-cols-3 gap-4">
+            <div className="lg:col-span-1 bg-gray-50 rounded-2xl p-4">
+              <div className="font-semibold mb-3">Zakres minut typów</div>
+
+              <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-sm text-gray-600 mb-1">
                     Minuta od
@@ -596,43 +768,58 @@ export default function Home() {
                     <option value="45">45</option>
                     <option value="60">60</option>
                     <option value="70">70</option>
+                    <option value="75">75</option>
                   </select>
                 </div>
 
                 <div>
                   <label className="block text-sm text-gray-600 mb-1">
-                    Auto refresh
+                    Minuta do
                   </label>
                   <select
-                    value={refreshSeconds}
-                    onChange={(e) => setRefreshSeconds(Number(e.target.value))}
+                    value={maxMinute}
+                    onChange={(e) => setMaxMinute(e.target.value)}
                     className="w-full border rounded-xl px-3 py-2 bg-white"
-                    disabled={!autoRefresh}
                   >
-                    {AUTO_REFRESH_OPTIONS.map((sec) => (
-                      <option key={sec} value={sec}>
-                        co {sec}s
-                      </option>
-                    ))}
+                    <option value="45">45</option>
+                    <option value="60">60</option>
+                    <option value="70">70</option>
+                    <option value="75">75</option>
+                    <option value="80">80</option>
+                    <option value="85">85</option>
+                    <option value="90">90</option>
+                    <option value="120">120</option>
                   </select>
                 </div>
               </div>
 
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={autoRefresh}
-                  onChange={(e) => setAutoRefresh(e.target.checked)}
-                  className="h-4 w-4"
-                />
-                Włącz automatyczne odświeżanie
-              </label>
+              <div className="text-xs text-gray-500 mt-3">
+                Aktualnie pokazujesz typy od <b>{numericMinMinute}'</b> do <b>{numericMaxMinute}'</b>.
+              </div>
+            </div>
 
-              <div className="flex flex-wrap gap-3">
+            <div className="lg:col-span-2 bg-gray-50 rounded-2xl p-4">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div>
+                  <div className="font-semibold">Akcje</div>
+                  <div className="text-xs text-gray-500">
+                    Import i sprawdzanie wyników uruchamiasz ręcznie.
+                  </div>
+                </div>
+
+                <div className="text-xs">
+                  Powiadomienia:{' '}
+                  <b className={browserAlerts ? 'text-green-700' : 'text-red-700'}>
+                    {browserAlerts ? 'ON' : 'OFF'}
+                  </b>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 <button
                   onClick={handleImport}
                   disabled={loading}
-                  className="bg-black text-white px-6 py-3 rounded-xl font-semibold disabled:opacity-50"
+                  className="bg-black text-white px-5 py-3 rounded-xl font-semibold shadow-sm hover:scale-[1.02] transition disabled:opacity-50"
                 >
                   {loading ? 'Importowanie...' : 'Import'}
                 </button>
@@ -640,34 +827,50 @@ export default function Home() {
                 <button
                   onClick={handleCheckResults}
                   disabled={checkingResults}
-                  className="bg-white border px-6 py-3 rounded-xl font-semibold hover:bg-gray-50 disabled:opacity-50"
+                  className="bg-white border px-5 py-3 rounded-xl font-semibold hover:bg-gray-100 transition disabled:opacity-50"
                 >
                   {checkingResults ? 'Sprawdzanie...' : 'Sprawdź wyniki'}
                 </button>
 
                 <button
-                  onClick={loadStats}
-                  disabled={statsLoading}
-                  className="bg-white border px-6 py-3 rounded-xl font-semibold hover:bg-gray-50 disabled:opacity-50"
+                  onClick={requestNotificationPermission}
+                  className="bg-white border px-5 py-3 rounded-xl font-semibold hover:bg-gray-100 transition"
                 >
-                  {statsLoading ? 'Ładowanie...' : 'Statystyki'}
+                  {browserAlerts ? 'Powiadomienia ON' : 'Włącz powiadomienia'}
                 </button>
 
                 <button
                   onClick={handleClear}
                   disabled={loading || checkingResults}
-                  className="bg-white border px-6 py-3 rounded-xl font-semibold hover:bg-gray-50 disabled:opacity-50"
+                  className="bg-white border px-5 py-3 rounded-xl font-semibold hover:bg-gray-100 transition disabled:opacity-50"
                 >
                   Wyczyść
                 </button>
-
-                <button
-                  onClick={requestNotificationPermission}
-                  className="bg-white border px-6 py-3 rounded-xl font-semibold hover:bg-gray-50"
-                >
-                  {browserAlerts ? 'Powiadomienia włączone' : 'Włącz powiadomienia'}
-                </button>
               </div>
+
+              {debug && (
+                <div className="mt-5">
+                  <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+                    <span>Progress importu</span>
+                    <span>
+                      {debug.checked ?? 0} / {debug.live ?? 0} meczów
+                    </span>
+                  </div>
+
+                  <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                    <div
+                      className="bg-black h-2 rounded-full"
+                      style={{
+                        width: `${
+                          debug.live && debug.live > 0
+                            ? Math.min(100, Math.round(((debug.checked ?? 0) / debug.live) * 100))
+                            : 0
+                        }%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -701,110 +904,36 @@ export default function Home() {
           </div>
         )}
 
-        <section className="mb-6 bg-white border rounded-2xl p-4 shadow-sm">
-          <div className="flex items-center justify-between gap-3 mb-4">
-            <div>
-              <h2 className="text-2xl font-semibold">📊 Skuteczność typów</h2>
-              <p className="text-sm text-gray-500 mt-1">
-                Liczone tylko z rozliczonych rekordów: HIT + MISS. Pending nie wchodzi do procentu.
-              </p>
-            </div>
-
-            <button
-              onClick={loadStats}
-              disabled={statsLoading}
-              className="bg-white border px-4 py-2 rounded-xl font-semibold hover:bg-gray-50 disabled:opacity-50"
-            >
-              {statsLoading ? 'Ładowanie...' : 'Odśwież'}
-            </button>
-          </div>
-
-          {stats.length === 0 ? (
-            <div className="text-sm text-gray-500">
-              Brak rozliczonych danych. Kliknij „Sprawdź wyniki” po zakończeniu meczów.
-            </div>
-          ) : (
-            <div className="grid md:grid-cols-2 xl:grid-cols-4 gap-3">
-              {stats.map((s) => (
-                <div key={s.type} className="border rounded-xl p-4">
-                  <div className="font-semibold">{typeLabel(s.type)}</div>
-
-                  <div className="grid grid-cols-3 gap-2 mt-3 text-sm">
-                    <div className="bg-gray-50 rounded-lg p-2">
-                      <div className="text-gray-500">Total</div>
-                      <div className="font-bold">{s.total}</div>
-                    </div>
-                    <div className="bg-green-50 rounded-lg p-2">
-                      <div className="text-gray-500">Hit</div>
-                      <div className="font-bold text-green-700">{s.hit}</div>
-                    </div>
-                    <div className="bg-red-50 rounded-lg p-2">
-                      <div className="text-gray-500">Miss</div>
-                      <div className="font-bold text-red-700">{s.miss}</div>
-                    </div>
-                  </div>
-
-                  <div className="mt-3 text-sm">
-                    Skuteczność:{' '}
-                    <b className={hitRateClass(s.hitRate)}>{s.hitRate}%</b>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
         {debug && (
           <div className="bg-white border rounded-2xl p-4 shadow-sm mb-6">
-            <div className="font-semibold mb-3">Debug importu</div>
-
-            <div className="grid grid-cols-2 md:grid-cols-6 gap-3 text-sm">
-              <div className="bg-gray-50 rounded-xl p-3">
-                <div className="text-gray-500">Live</div>
-                <div className="font-bold text-lg">{debug.live ?? 0}</div>
-              </div>
-
-              <div className="bg-gray-50 rounded-xl p-3">
-                <div className="text-gray-500">Odds checked</div>
-                <div className="font-bold text-lg">{debug.checked ?? 0}</div>
-              </div>
-
-              <div className="bg-gray-50 rounded-xl p-3">
-                <div className="text-gray-500">Results</div>
-                <div className="font-bold text-lg">{debug.results ?? 0}</div>
-              </div>
-
-              <div className="bg-gray-50 rounded-xl p-3">
-                <div className="text-gray-500">Cache</div>
-                <div className="font-bold text-lg">
-                  {debug.cached ? 'Tak' : 'Nie'}
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <div>
+                <div className="font-semibold">Podsumowanie importu</div>
+                <div className="text-sm text-gray-500">
+                  Prosty wynik ostatniego screeningu.
                 </div>
               </div>
+              {lastImport && (
+                <div className="text-sm text-gray-500">
+                  Ostatni import: {lastImport}
+                </div>
+              )}
+            </div>
 
-              <div className="bg-gray-50 rounded-xl p-3">
-                <div className="text-gray-500">Wiek cache</div>
-                <div className="font-bold text-lg">{debug.cacheAgeSec ?? 0}s</div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+              <div className="bg-gray-50 rounded-xl p-4">
+                <div className="text-gray-500">Mecze live</div>
+                <div className="font-bold text-2xl">{debug.live ?? 0}</div>
               </div>
 
-              <div className="bg-gray-50 rounded-xl p-3">
-                <div className="text-gray-500">Wszystkie mecze</div>
-                <div className="font-bold text-lg">
-                  {debug.totalCandidates ?? 0}
-                </div>
+              <div className="bg-gray-50 rounded-xl p-4">
+                <div className="text-gray-500">Przeanalizowane mecze</div>
+                <div className="font-bold text-2xl">{debug.checked ?? 0}</div>
               </div>
 
-              <div className="bg-gray-50 rounded-xl p-3 md:col-span-2">
-                <div className="text-gray-500">Batch</div>
-                <div className="font-bold text-lg">
-                  {debug.batchStart ?? 0}-{debug.batchEnd ?? 0}
-                </div>
-              </div>
-
-              <div className="bg-gray-50 rounded-xl p-3 md:col-span-2">
-                <div className="text-gray-500">Wersja</div>
-                <div className="font-bold text-lg">
-                  {debug.version ?? 'brak'}
-                </div>
+              <div className="bg-gray-50 rounded-xl p-4">
+                <div className="text-gray-500">Znalezione typy</div>
+                <div className="font-bold text-2xl">{debug.results ?? 0}</div>
               </div>
             </div>
           </div>
@@ -839,7 +968,7 @@ export default function Home() {
           </div>
           <div className="bg-white border rounded-2xl p-4 shadow-sm">
             <div className="text-sm text-gray-500">
-              Faworyt do 1.50 + strzały ≥ 7
+              Faworyt ≤1.80 nie wygrywa + strzały ≥ 7
             </div>
             <div className="text-2xl font-bold mt-1">{favShots7.length}</div>
           </div>
@@ -919,7 +1048,7 @@ export default function Home() {
 
         <section className="mb-10">
           <h2 className="text-2xl font-semibold mb-4">
-            🟢 Faworyt ≤1.50 + przewaga strzałów ≥ 7
+            🟢 Faworyt ≤1.80 nie wygrywa + strzały ≥ 7
           </h2>
 
           {favShots7.length === 0 ? (
@@ -938,180 +1067,100 @@ export default function Home() {
             </div>
           )}
         </section>
-
-        <section className="mb-10">
+<section className="mb-10 bg-white border rounded-2xl p-4 shadow-sm">
           <div className="flex items-center justify-between gap-3 mb-4">
             <div>
-              <h2 className="text-2xl font-semibold">📜 Historia importów</h2>
+              <h2 className="text-2xl font-semibold">📊 Statystyki i historia kategorii</h2>
               <p className="text-sm text-gray-500 mt-1">
-                Pokazuje zapisane screeningi z Supabase. To nie zużywa API-Football.
+                Kliknij kategorię, żeby zobaczyć wszystkie historyczne mecze. Procent liczony tylko z HIT + MISS.
               </p>
             </div>
 
             <button
-              onClick={loadHistory}
-              disabled={historyLoading}
+              onClick={loadStats}
+              disabled={statsLoading}
               className="bg-white border px-4 py-2 rounded-xl font-semibold hover:bg-gray-50 disabled:opacity-50"
             >
-              {historyLoading ? 'Odświeżanie...' : 'Odśwież historię'}
+              {statsLoading ? 'Ładowanie...' : 'Odśwież'}
             </button>
           </div>
 
-          {historyError && (
-            <div className="mb-4 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl">
-              {historyError}
+          {stats.length === 0 ? (
+            <div className="text-sm text-gray-500">
+              Brak danych. Najpierw uruchom import albo sprawdź wyniki po zakończeniu meczów.
+            </div>
+          ) : (
+            <div className="grid md:grid-cols-2 xl:grid-cols-4 gap-3">
+              {stats.map((s) => (
+                <button
+                  key={s.type}
+                  onClick={() => setSelectedStatsType(String(s.type))}
+                  className={`text-left border rounded-xl p-4 hover:bg-gray-50 ${
+                    selectedStatsType === s.type ? 'border-black bg-gray-50' : ''
+                  }`}
+                >
+                  <div className="font-semibold">{typeLabel(s.type)}</div>
+
+                  <div className="grid grid-cols-4 gap-2 mt-3 text-sm">
+                    <div className="bg-gray-50 rounded-lg p-2">
+                      <div className="text-gray-500">Total</div>
+                      <div className="font-bold">{s.total}</div>
+                    </div>
+                    <div className="bg-green-50 rounded-lg p-2">
+                      <div className="text-gray-500">Hit</div>
+                      <div className="font-bold text-green-700">{s.hit}</div>
+                    </div>
+                    <div className="bg-red-50 rounded-lg p-2">
+                      <div className="text-gray-500">Miss</div>
+                      <div className="font-bold text-red-700">{s.miss}</div>
+                    </div>
+                    <div className="bg-yellow-50 rounded-lg p-2">
+                      <div className="text-gray-500">Pend.</div>
+                      <div className="font-bold text-yellow-700">{s.pending}</div>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 text-sm">
+                    Skuteczność:{' '}
+                    <b className={hitRateClass(s.hitRate)}>{s.hitRate}%</b>
+                  </div>
+                </button>
+              ))}
             </div>
           )}
 
-          <div className="grid lg:grid-cols-3 gap-4">
-            <div className="bg-white border rounded-2xl p-4 shadow-sm lg:col-span-1">
-              <div className="font-semibold mb-3">Importy</div>
+          {selectedStats && (
+            <div className="mt-6">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <h3 className="text-xl font-semibold">
+                    Historia: {typeLabel(selectedStats.type)}
+                  </h3>
+                  <p className="text-sm text-gray-500">
+                    Wszystkie mecze tej kategorii, najnowsze na górze.
+                  </p>
+                </div>
+                <div className="text-sm text-gray-500">
+                  Rekordy: {selectedStats.matches.length}
+                </div>
+              </div>
 
-              {historyRuns.length === 0 ? (
-                <div className="text-sm text-gray-500">Brak historii</div>
+              {selectedStats.matches.length === 0 ? (
+                <div className="border rounded-xl p-4 text-gray-500">
+                  Brak meczów w tej kategorii.
+                </div>
               ) : (
-                <div className="grid gap-2 max-h-[520px] overflow-auto pr-1">
-                  {historyRuns.map((run) => (
-                    <button
-                      key={run.id}
-                      onClick={() => setSelectedRunId(run.id)}
-                      className={`text-left border rounded-xl p-3 hover:bg-gray-50 ${
-                        selectedRunId === run.id
-                          ? 'border-black bg-gray-50'
-                          : 'border-gray-200 bg-white'
-                      }`}
-                    >
-                      <div className="font-semibold text-sm">
-                        {formatDateTime(run.created_at)}
-                      </div>
-                      <div className="text-xs text-gray-500 mt-1">
-                        Źródło: {run.source}
-                      </div>
-                      <div className="grid grid-cols-3 gap-2 mt-2 text-xs">
-                        <div>
-                          <span className="text-gray-500">Live</span>
-                          <div className="font-bold">{run.live_count}</div>
-                        </div>
-                        <div>
-                          <span className="text-gray-500">Checked</span>
-                          <div className="font-bold">{run.checked_count}</div>
-                        </div>
-                        <div>
-                          <span className="text-gray-500">Typy</span>
-                          <div className="font-bold">{run.results_count}</div>
-                        </div>
-                      </div>
-                    </button>
+                <div className="grid gap-3">
+                  {selectedStats.matches.map((m) => (
+                    <HistoryMatchCard key={m.id} m={m} />
                   ))}
                 </div>
               )}
             </div>
-
-            <div className="bg-white border rounded-2xl p-4 shadow-sm lg:col-span-2">
-              <div className="font-semibold mb-3">Szczegóły importu</div>
-
-              {!selectedRun ? (
-                <div className="text-sm text-gray-500">
-                  Wybierz import z listy.
-                </div>
-              ) : (
-                <>
-                  <div className="grid sm:grid-cols-4 gap-3 text-sm mb-4">
-                    <div className="bg-gray-50 rounded-xl p-3">
-                      <div className="text-gray-500">Godzina</div>
-                      <div className="font-bold">
-                        {formatDateTime(selectedRun.created_at)}
-                      </div>
-                    </div>
-                    <div className="bg-gray-50 rounded-xl p-3">
-                      <div className="text-gray-500">Live</div>
-                      <div className="font-bold">{selectedRun.live_count}</div>
-                    </div>
-                    <div className="bg-gray-50 rounded-xl p-3">
-                      <div className="text-gray-500">Checked</div>
-                      <div className="font-bold">{selectedRun.checked_count}</div>
-                    </div>
-                    <div className="bg-gray-50 rounded-xl p-3">
-                      <div className="text-gray-500">Typy</div>
-                      <div className="font-bold">{selectedRun.results_count}</div>
-                    </div>
-                  </div>
-
-                  {selectedRun.matches.length === 0 ? (
-                    <div className="border rounded-xl p-4 text-gray-500">
-                      W tym imporcie nie było typów.
-                    </div>
-                  ) : (
-                    <div className="grid gap-3">
-                      {selectedRun.matches.map((m) => (
-                        <div key={m.id} className="border rounded-xl p-4">
-                          <div className="flex justify-between gap-3">
-                            <div>
-                              <div className="font-semibold">
-                                {m.home} vs {m.away}
-                              </div>
-                              <div className="text-sm text-gray-500">
-                                {m.league}
-                              </div>
-                            </div>
-
-                            <div className="flex flex-col items-end gap-2">
-                              <div className="text-sm font-semibold bg-gray-100 px-3 py-1 rounded-full h-fit">
-                                {m.minute}'
-                              </div>
-                              <div
-                                className={`text-xs font-bold border px-2 py-1 rounded-full ${outcomeClass(
-                                  m.outcome
-                                )}`}
-                              >
-                                {outcomeLabel(m.outcome)}
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="grid gap-1 mt-3 text-sm">
-                            <div>
-                              Wynik przy imporcie: <b>{m.score}</b>
-                            </div>
-                            {m.final_score && (
-                              <div>
-                                Finalny wynik: <b>{m.final_score}</b>
-                              </div>
-                            )}
-                            <div>
-                              Faworyt: <b>{m.favorite}</b> ({m.odds})
-                            </div>
-                            <div className="font-medium">
-                              {typeLabel(m.type)}
-                            </div>
-                            {m.shots_diff !== undefined &&
-                              m.shots_diff !== null && (
-                                <div>
-                                  Strzały: <b>{m.shots_favorite}</b> vs{' '}
-                                  <b>{m.shots_opponent}</b> (różnica:{' '}
-                                  {m.shots_diff})
-                                </div>
-                              )}
-                            {m.red_card && (
-                              <div className="text-red-700">
-                                Czerwona kartka: <b>{m.red_card}</b>
-                              </div>
-                            )}
-                            {m.checked_at && (
-                              <div className="text-xs text-gray-500 mt-1">
-                                Sprawdzone: {formatDateTime(m.checked_at)}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
+          )}
         </section>
+
+        
       </div>
     </main>
   )

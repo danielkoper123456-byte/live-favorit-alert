@@ -20,10 +20,14 @@ type MatchType =
   | 'fav_losing_15'
   | 'fav_not_winning_15_60'
   | 'fav_not_winning_22_red'
-  | 'fav_15_shots_7'
+  | 'fav_18_not_winning_shots_7'
 
 type AppMatch = {
   fixtureId: number
+  leagueId: number | null
+  season: number | null
+  homeTeamId: number | null
+  awayTeamId: number | null
   league: string
   home: string
   away: string
@@ -36,6 +40,17 @@ type AppMatch = {
   shotsFavorite?: number | null
   shotsOpponent?: number | null
   shotsDiff?: number | null
+  favoriteRank?: number | null
+  favoritePoints?: number | null
+  favoriteGoalsFor?: number | null
+  favoriteGoalsAgainst?: number | null
+  opponentRank?: number | null
+  opponentPoints?: number | null
+  opponentGoalsFor?: number | null
+  opponentGoalsAgainst?: number | null
+  favoriteForm?: string | null
+  opponentForm?: string | null
+  liveOdd?: number | null
 }
 
 type DebugInfo = {
@@ -60,6 +75,10 @@ type CachePayload = {
 
 type Candidate = {
   id: number
+  leagueId: number | null
+  season: number | null
+  homeTeamId: number | null
+  awayTeamId: number | null
   league: string
   home: string
   away: string
@@ -69,6 +88,19 @@ type Candidate = {
   awayGoals: number
   redCard: string | null
   priority: number
+}
+
+type StandingInfo = {
+  rank: number | null
+  points: number | null
+  goalsFor: number | null
+  goalsAgainst: number | null
+  form: string | null
+}
+
+type ShotsInfo = {
+  homeShots: number
+  awayShots: number
 }
 
 async function apiFetch(path: string, retries = 2): Promise<any> {
@@ -206,7 +238,13 @@ function extractFavoriteWithMax(
   return null
 }
 
-async function getShots(fixtureId: number) {
+async function getShots(fixtureId: number): Promise<ShotsInfo | null> {
+  globalAny.shotsCache = globalAny.shotsCache || {}
+
+  if (globalAny.shotsCache[fixtureId]) {
+    return globalAny.shotsCache[fixtureId] as ShotsInfo
+  }
+
   try {
     const data = await apiFetch(`/fixtures/statistics?fixture=${fixtureId}`)
     const stats = data?.response
@@ -235,22 +273,221 @@ async function getShots(fixtureId: number) {
       getVal(away.statistics || [], 'Shots on Goal') +
       getVal(away.statistics || [], 'Shots off Goal')
 
-    return {
+    const result = {
       homeShots,
       awayShots,
     }
+
+    globalAny.shotsCache[fixtureId] = result
+    return result
   } catch {
     return null
   }
 }
 
-function dedupeMatches(matches: AppMatch[]): AppMatch[] {
-  const map = new Map<string, AppMatch>()
+function parseStandingRow(row: any): StandingInfo {
+  return {
+    rank: row?.rank ?? null,
+    points: row?.points ?? null,
+    goalsFor: row?.all?.goals?.for ?? null,
+    goalsAgainst: row?.all?.goals?.against ?? null,
+    form: row?.form ?? null,
+  }
+}
+
+async function getStandingsMap(leagueId: number | null, season: number | null) {
+  if (!leagueId || !season) return null
+
+  const cacheKey = `${leagueId}-${season}`
+  globalAny.standingsCache = globalAny.standingsCache || {}
+
+  if (globalAny.standingsCache[cacheKey]) {
+    return globalAny.standingsCache[cacheKey] as Map<number, StandingInfo>
+  }
+
+  try {
+    const data = await apiFetch(`/standings?league=${leagueId}&season=${season}`)
+    const standingsGroups = data?.response?.[0]?.league?.standings || []
+
+    const map = new Map<number, StandingInfo>()
+
+    for (const group of standingsGroups) {
+      if (!Array.isArray(group)) continue
+
+      for (const row of group) {
+        const teamId = Number(row?.team?.id)
+        if (!teamId) continue
+        map.set(teamId, parseStandingRow(row))
+      }
+    }
+
+    globalAny.standingsCache[cacheKey] = map
+    return map
+  } catch {
+    return null
+  }
+}
+
+async function getLiveOddForFavorite(
+  fixtureId: number,
+  favoriteIsHome: boolean
+): Promise<number | null> {
+  try {
+    const data = await apiFetch(`/odds/live?fixture=${fixtureId}`)
+    const response = data?.response || []
+
+    if (!Array.isArray(response) || response.length === 0) return null
+
+    const bets = response[0]?.bets || []
+    if (!Array.isArray(bets) || bets.length === 0) return null
+
+    const winnerBet = bets.find((b: any) => {
+      const name = String(b?.name || '').toLowerCase()
+      return (
+        name.includes('match winner') ||
+        name.includes('winner') ||
+        name.includes('1x2')
+      )
+    })
+
+    if (!winnerBet) return null
+
+    const values = winnerBet?.values || []
+    if (!Array.isArray(values)) return null
+
+    for (const v of values) {
+      const value = String(v?.value || '').toLowerCase()
+      const odd = Number(v?.odd)
+
+      if (!Number.isFinite(odd)) continue
+
+      if (favoriteIsHome && (value === 'home' || value === '1')) {
+        return odd
+      }
+
+      if (!favoriteIsHome && (value === 'away' || value === '2')) {
+        return odd
+      }
+    }
+
+    return null
+  } catch {
+    return null
+  }
+}
+
+async function enrichMatch(match: AppMatch): Promise<AppMatch> {
+  const favoriteIsHome = match.favorite === match.home
+
+  const favoriteTeamId = favoriteIsHome ? match.homeTeamId : match.awayTeamId
+  const opponentTeamId = favoriteIsHome ? match.awayTeamId : match.homeTeamId
+
+  let favoriteStanding: StandingInfo | null = null
+  let opponentStanding: StandingInfo | null = null
+
+  const standingsMap = await getStandingsMap(match.leagueId, match.season)
+
+  if (standingsMap) {
+    if (favoriteTeamId) {
+      favoriteStanding = standingsMap.get(favoriteTeamId) || null
+    }
+
+    if (opponentTeamId) {
+      opponentStanding = standingsMap.get(opponentTeamId) || null
+    }
+  }
+
+  const liveOdd = await getLiveOddForFavorite(match.fixtureId, favoriteIsHome)
+
+  return {
+    ...match,
+    favoriteRank: favoriteStanding?.rank ?? null,
+    favoritePoints: favoriteStanding?.points ?? null,
+    favoriteGoalsFor: favoriteStanding?.goalsFor ?? null,
+    favoriteGoalsAgainst: favoriteStanding?.goalsAgainst ?? null,
+    opponentRank: opponentStanding?.rank ?? null,
+    opponentPoints: opponentStanding?.points ?? null,
+    opponentGoalsFor: opponentStanding?.goalsFor ?? null,
+    opponentGoalsAgainst: opponentStanding?.goalsAgainst ?? null,
+    favoriteForm: favoriteStanding?.form ?? null,
+    opponentForm: opponentStanding?.form ?? null,
+    liveOdd,
+  }
+}
+
+async function enrichMatches(matches: AppMatch[]) {
+  const enriched: AppMatch[] = []
 
   for (const match of matches) {
-    const key = `${match.fixtureId}-${match.type}`
-    if (!map.has(key)) {
-      map.set(key, match)
+    await WAIT(200)
+    enriched.push(await enrichMatch(match))
+  }
+
+  return enriched
+}
+
+async function addShotsToMatch(match: AppMatch): Promise<AppMatch> {
+  const shots = await getShots(match.fixtureId)
+
+  if (!shots) {
+    return {
+      ...match,
+      shotsFavorite: match.shotsFavorite ?? null,
+      shotsOpponent: match.shotsOpponent ?? null,
+      shotsDiff: match.shotsDiff ?? null,
+    }
+  }
+
+  const favoriteIsHome = match.favorite === match.home
+  const favShots = favoriteIsHome ? shots.homeShots : shots.awayShots
+  const oppShots = favoriteIsHome ? shots.awayShots : shots.homeShots
+  const diff = favShots - oppShots
+
+  return {
+    ...match,
+    shotsFavorite: favShots,
+    shotsOpponent: oppShots,
+    shotsDiff: diff,
+  }
+}
+
+async function addShotsToAllMatches(matches: AppMatch[]) {
+  const result: AppMatch[] = []
+
+  for (const match of matches) {
+    await WAIT(150)
+    result.push(await addShotsToMatch(match))
+  }
+
+  return result
+}
+
+function dedupeMatches(matches: AppMatch[]): AppMatch[] {
+  // Jeden mecz może spełnić kilka warunków.
+  // Zostawiamy tylko najmocniejszą kategorię dla danego fixtureId.
+  const priority: Record<string, number> = {
+    fav_18_not_winning_shots_7: 4,
+    fav_15_shots_7: 4,
+    fav_not_winning_22_red: 3,
+    fav_losing_15: 2,
+    fav_not_winning_15_60: 1,
+  }
+
+  const map = new Map<number, AppMatch>()
+
+  for (const match of matches) {
+    const existing = map.get(match.fixtureId)
+
+    if (!existing) {
+      map.set(match.fixtureId, match)
+      continue
+    }
+
+    const currentPriority = priority[match.type] ?? 0
+    const existingPriority = priority[existing.type] ?? 0
+
+    if (currentPriority > existingPriority) {
+      map.set(match.fixtureId, match)
     }
   }
 
@@ -284,7 +521,7 @@ function buildCachedResponse(
       totalCandidates,
       batchStart,
       batchEnd,
-      version: 'full-screening-shots-dedupe-v1',
+      version: 'full-screening-context-shots-18-not-winning-v1',
       runId,
     },
   }
@@ -384,6 +621,17 @@ async function saveScreeningMatches(runId: string | null, matches: AppMatch[]) {
     shots_favorite: m.shotsFavorite ?? null,
     shots_opponent: m.shotsOpponent ?? null,
     shots_diff: m.shotsDiff ?? null,
+    favorite_rank: m.favoriteRank ?? null,
+    favorite_points: m.favoritePoints ?? null,
+    favorite_goals_for: m.favoriteGoalsFor ?? null,
+    favorite_goals_against: m.favoriteGoalsAgainst ?? null,
+    opponent_rank: m.opponentRank ?? null,
+    opponent_points: m.opponentPoints ?? null,
+    opponent_goals_for: m.opponentGoalsFor ?? null,
+    opponent_goals_against: m.opponentGoalsAgainst ?? null,
+    favorite_form: m.favoriteForm ?? null,
+    opponent_form: m.opponentForm ?? null,
+    live_odd: m.liveOdd ?? null,
   }))
 
   const { error } = await supabase.from('screening_matches').insert(rows)
@@ -400,6 +648,43 @@ async function saveScreeningMatches(runId: string | null, matches: AppMatch[]) {
   return {
     inserted: rows.length,
     skippedDuplicates: matches.length - newMatches.length,
+  }
+}
+
+function buildBaseMatch(
+  c: Candidate,
+  favorite: { team: string; odd: number },
+  type: MatchType
+): AppMatch {
+  return {
+    fixtureId: c.id,
+    leagueId: c.leagueId,
+    season: c.season,
+    homeTeamId: c.homeTeamId,
+    awayTeamId: c.awayTeamId,
+    league: c.league,
+    home: c.home,
+    away: c.away,
+    minute: c.minute,
+    score: c.score,
+    favorite: favorite.team,
+    odds: favorite.odd,
+    redCard: c.redCard,
+    type,
+    shotsFavorite: null,
+    shotsOpponent: null,
+    shotsDiff: null,
+    favoriteRank: null,
+    favoritePoints: null,
+    favoriteGoalsFor: null,
+    favoriteGoalsAgainst: null,
+    opponentRank: null,
+    opponentPoints: null,
+    opponentGoalsFor: null,
+    opponentGoalsAgainst: null,
+    favoriteForm: null,
+    opponentForm: null,
+    liveOdd: null,
   }
 }
 
@@ -453,6 +738,10 @@ export async function GET() {
 
       return {
         id: fixtureId,
+        leagueId: Number(f?.league?.id) || null,
+        season: Number(f?.league?.season) || null,
+        homeTeamId: Number(f?.teams?.home?.id) || null,
+        awayTeamId: Number(f?.teams?.away?.id) || null,
         league: String(f?.league?.name || 'Nieznana liga'),
         home,
         away,
@@ -496,7 +785,15 @@ export async function GET() {
       if (!odds) continue
 
       const fav15 = extractFavoriteWithMax(odds, c.home, c.away, 1.5)
+      const fav18 = extractFavoriteWithMax(odds, c.home, c.away, 1.8)
       const fav22 = extractFavoriteWithMax(odds, c.home, c.away, 2.2)
+
+      let shots: ShotsInfo | null = null
+
+      if (fav15 || fav18 || fav22) {
+        await WAIT(150)
+        shots = await getShots(c.id)
+      }
 
       if (fav15) {
         const favoriteIsHome = fav15.team === c.home
@@ -508,67 +805,26 @@ export async function GET() {
           c.minute >= 60 && favoriteGoals <= opponentGoals
 
         if (losing) {
-          matches.push({
-            fixtureId: c.id,
-            league: c.league,
-            home: c.home,
-            away: c.away,
-            minute: c.minute,
-            score: c.score,
-            favorite: fav15.team,
-            odds: fav15.odd,
-            redCard: c.redCard,
-            type: 'fav_losing_15',
-            shotsFavorite: null,
-            shotsOpponent: null,
-            shotsDiff: null,
-          })
+          matches.push(buildBaseMatch(c, fav15, 'fav_losing_15'))
         }
 
         if (drawingOrLosingAfter60) {
-          matches.push({
-            fixtureId: c.id,
-            league: c.league,
-            home: c.home,
-            away: c.away,
-            minute: c.minute,
-            score: c.score,
-            favorite: fav15.team,
-            odds: fav15.odd,
-            redCard: c.redCard,
-            type: 'fav_not_winning_15_60',
-            shotsFavorite: null,
-            shotsOpponent: null,
-            shotsDiff: null,
-          })
+          matches.push(buildBaseMatch(c, fav15, 'fav_not_winning_15_60'))
         }
+      }
 
-        await WAIT(200)
+      if (fav18 && shots) {
+        const favoriteIsHome = fav18.team === c.home
+        const favoriteGoals = favoriteIsHome ? c.homeGoals : c.awayGoals
+        const opponentGoals = favoriteIsHome ? c.awayGoals : c.homeGoals
+        const favoriteNotWinning = favoriteGoals <= opponentGoals
 
-        const shots = await getShots(c.id)
+        const favShots = favoriteIsHome ? shots.homeShots : shots.awayShots
+        const oppShots = favoriteIsHome ? shots.awayShots : shots.homeShots
+        const diff = favShots - oppShots
 
-        if (shots) {
-          const favShots = favoriteIsHome ? shots.homeShots : shots.awayShots
-          const oppShots = favoriteIsHome ? shots.awayShots : shots.homeShots
-          const diff = favShots - oppShots
-
-          if (diff >= 7) {
-            matches.push({
-              fixtureId: c.id,
-              league: c.league,
-              home: c.home,
-              away: c.away,
-              minute: c.minute,
-              score: c.score,
-              favorite: fav15.team,
-              odds: fav15.odd,
-              redCard: c.redCard,
-              type: 'fav_15_shots_7',
-              shotsFavorite: favShots,
-              shotsOpponent: oppShots,
-              shotsDiff: diff,
-            })
-          }
+        if (favoriteNotWinning && diff >= 7) {
+          matches.push(buildBaseMatch(c, fav18, 'fav_18_not_winning_shots_7'))
         }
       }
 
@@ -583,35 +839,23 @@ export async function GET() {
           (!favoriteIsHome && c.redCard === c.home)
 
         if (favoriteDrawingOrLosing && redOnOpponent) {
-          matches.push({
-            fixtureId: c.id,
-            league: c.league,
-            home: c.home,
-            away: c.away,
-            minute: c.minute,
-            score: c.score,
-            favorite: fav22.team,
-            odds: fav22.odd,
-            redCard: c.redCard,
-            type: 'fav_not_winning_22_red',
-            shotsFavorite: null,
-            shotsOpponent: null,
-            shotsDiff: null,
-          })
+          matches.push(buildBaseMatch(c, fav22, 'fav_not_winning_22_red'))
         }
       }
     }
 
     const finalMatches = dedupeMatches(matches)
+    const withShots = await addShotsToAllMatches(finalMatches)
+    const enrichedMatches = await enrichMatches(withShots)
 
-    const saveResult = await saveScreeningMatches(runId, finalMatches)
+    const saveResult = await saveScreeningMatches(runId, enrichedMatches)
 
     await updateScreeningRun(runId, {
       results_count: saveResult.inserted,
     })
 
     const payload = buildCachedResponse(
-      finalMatches,
+      enrichedMatches,
       fixtures.length,
       oddsCandidates.length,
       rawFixtures.length,
@@ -623,7 +867,7 @@ export async function GET() {
       runId
     )
 
-    payload.debug.results = finalMatches.length
+    payload.debug.results = enrichedMatches.length
 
     globalAny.importCache = {
       timestamp: now,
