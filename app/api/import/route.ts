@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 
 const API_BASE = 'https://v3.football.api-sports.io'
-const MAX_ODDS_REQUESTS = 100
+const MAX_ODDS_REQUESTS = 999
 const CACHE_TTL_MS = 20 * 1000
 
 const WAIT = (ms: number) => new Promise((res) => setTimeout(res, ms))
